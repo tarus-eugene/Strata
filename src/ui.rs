@@ -565,7 +565,11 @@ impl Strata {
                     .flex()
                     .items_center()
                     .px(px(12.))
-                    .child(label("Strata  /  0.1.0", 11., FAINT)),
+                    .child(label(
+                        format!("Strata  /  {}", env!("CARGO_PKG_VERSION")),
+                        11.,
+                        FAINT,
+                    )),
             )
     }
 
@@ -620,14 +624,16 @@ impl Strata {
         div()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .px(px(28.))
-            .pt(px(28.))
-            .gap(px(20.))
+            .pt(px(16.))
+            .gap(px(12.))
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .child(
@@ -651,9 +657,10 @@ impl Strata {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(104.))
+                    .h(px(64.))
+                    .flex_shrink_0()
                     .bg(rgb(SURFACE))
-                    .px(px(22.))
+                    .px(px(16.))
                     .gap(px(26.))
                     .child(metric(
                         "Transfer speed",
@@ -669,6 +676,7 @@ impl Strata {
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(12.))
                     .justify_between()
@@ -688,29 +696,48 @@ impl Strata {
             )
             .child(
                 div()
-                    .flex()
-                    .h(px(24.))
-                    .items_center()
-                    .px(px(14.))
-                    .child(label("File name", 12., FAINT).flex_1())
-                    .child(label("Progress", 12., FAINT).w(px(132.)))
-                    .when(!self.compact, |d| {
-                        d.child(label("Speed", 12., FAINT).w(px(90.)).text_right())
-                    })
-                    .child(div().w(px(42.))),
-            )
-            .child(
-                div()
-                    .id("download-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .when(files.is_empty(), |d| d.child(self.empty(cx)))
-                    .children(files.iter().map(|d| self.row(d, cx))),
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(rgb(RULE))
+                    .child(
+                        table_row()
+                            .h(px(32.))
+                            .flex_shrink_0()
+                            .child(label("File name", 12., FAINT).flex_1().min_w_0())
+                            .child(
+                                label("Size", 12., FAINT)
+                                    .w(px(84.))
+                                    .text_right()
+                                    .flex_shrink_0(),
+                            )
+                            .child(label("Status", 12., FAINT).w(px(100.)).flex_shrink_0())
+                            .child(label("Progress", 12., FAINT).w(px(132.)).flex_shrink_0())
+                            .when(!self.compact, |d| {
+                                d.child(
+                                    label("Speed", 12., FAINT)
+                                        .w(px(84.))
+                                        .text_right()
+                                        .flex_shrink_0(),
+                                )
+                            })
+                            .child(div().w(px(30.)).flex_shrink_0()),
+                    )
+                    .child(
+                        div()
+                            .id("download-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .when(files.is_empty(), |d| d.child(self.empty(cx)))
+                            .children(files.iter().map(|d| self.row(d, cx))),
+                    ),
             )
             .child(
                 div()
-                    .h(px(48.))
+                    .h(px(32.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -758,7 +785,8 @@ impl Strata {
         };
         div()
             .w_full()
-            .h(px(300.))
+            .h_full()
+            .min_h(px(160.))
             .flex()
             .flex_col()
             .justify_center()
@@ -782,49 +810,39 @@ impl Strata {
         let rate = self.rates.get(&id).copied().unwrap_or(0.);
         let color = status_color(d.status);
         let resumable = matches!(d.status, Status::Paused | Status::Failed);
-        div()
+        table_row()
             .id(ElementId::Name(format!("download-{id}").into()))
-            .w_full()
-            .h(px(88.))
-            .px(px(14.))
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .mb(px(6.))
+            .h(px(48.))
             .cursor_pointer()
             .when(selected, |d| d.bg(rgb(SURFACE)))
             .hover(|s| s.bg(rgb(SURFACE)))
             .focusable()
             .focus(|s| s.bg(rgb(RAISED)))
-            .child(div().w(px(32.)).flex_shrink_0().child(icon(
-                Icon::File,
-                27.,
-                if selected { TEXT } else { FAINT },
-            )))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(7.))
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon(Icon::File, 18., if selected { TEXT } else { FAINT }))
                     .child(
                         label(d.name.clone(), 14., TEXT)
-                            .font_weight(FontWeight::MEDIUM)
+                            .flex_1()
+                            .min_w_0()
                             .truncate(),
-                    )
-                    .child(
-                        label(
-                            format!(
-                                "{}  ·  {}",
-                                d.host(),
-                                d.total.map(bytes).unwrap_or_else(|| "Unknown size".into())
-                            ),
-                            12.,
-                            FAINT,
-                        )
-                        .truncate(),
                     ),
+            )
+            .child(
+                label(d.total.map(bytes).unwrap_or_else(|| "—".into()), 12., MUTED)
+                    .w(px(84.))
+                    .text_right()
+                    .flex_shrink_0(),
+            )
+            .child(
+                label(d.status.label(), 12., color)
+                    .w(px(100.))
+                    .flex_shrink_0(),
             )
             .child(
                 div()
@@ -833,22 +851,15 @@ impl Strata {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(label(d.status.label(), 11., color))
-                            .child(label(
-                                if d.total.is_some() {
-                                    format!("{:.0}%", d.fraction() * 100.)
-                                } else {
-                                    "—".into()
-                                },
-                                11.,
-                                FAINT,
-                            )),
-                    )
+                    .child(div().flex().items_center().justify_between().child(label(
+                        if d.total.is_some() {
+                            format!("{:.0}%", d.fraction() * 100.)
+                        } else {
+                            "—".into()
+                        },
+                        11.,
+                        FAINT,
+                    )))
                     .child(progress(d.fraction(), color)),
             )
             .when(!self.compact, |row| {
@@ -862,7 +873,7 @@ impl Strata {
                         12.,
                         MUTED,
                     )
-                    .w(px(78.))
+                    .w(px(84.))
                     .text_right()
                     .flex_shrink_0(),
                 )
@@ -967,38 +978,21 @@ impl Strata {
     }
 
     fn inspector(&self, cx: &mut Context<Self>) -> Div {
-        let selected = self
-            .downloads
-            .iter()
-            .find(|d| Some(d.id) == self.selected)
-            .cloned();
-        let width = if self.compact { 272. } else { 304. };
-        let mut panel = div()
-            .w(px(width))
-            .h_full()
+        let selected = self.downloads.iter().find(|d| Some(d.id) == self.selected);
+        let panel = div()
+            .w_full()
+            .min_w_0()
             .flex_shrink_0()
-            .border_l_1()
+            .border_t_1()
             .border_color(rgb(RULE))
             .flex()
             .flex_col();
-        panel = panel.child(
-            div()
-                .h(px(64.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .px(px(22.))
-                .border_b_1()
-                .border_color(rgb(RULE))
-                .child(label("Transfer details", 13., MUTED)),
-        );
         let Some(d) = selected else {
-            return panel.child(div().p(px(24.)).flex().flex_col().gap(px(16.))
-                .child(label("A little more visibility.", 17., TEXT).font_weight(FontWeight::MEDIUM))
-                .child(label("Select a download to see its progress, connections, and destination.", 13., MUTED).line_height(px(22.)))
-                .child(div().h(px(1.)).bg(rgb(RULE)).my(px(10.)))
-                .child(label("Built for the bigger files", 13., TEXT))
-                .child(label("Strata splits compatible files into parts and downloads them together. Each connection gets its own lane here.", 13., FAINT).line_height(px(22.))));
+            return panel.h(px(64.)).justify_center().px(px(28.)).child(label(
+                "Click on a download to view more info.",
+                13.,
+                MUTED,
+            ));
         };
         let id = d.id;
         let rate = self.rates.get(&id).copied().unwrap_or(0.);
@@ -1008,218 +1002,281 @@ impl Strata {
         } else {
             None
         };
-        panel.child(
+        let actions =
             div()
-                .id("details-scroll")
-                .overflow_y_scroll()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    div()
-                        .w_full()
-                        .p(px(22.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(18.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .child(icon(Icon::File, 30., MUTED))
-                                .child(
-                                    div().flex_1().min_w_0().child(
+                .flex()
+                .flex_wrap()
+                .gap(px(8.))
+                .when(d.status == Status::Complete, |actions| {
+                    actions.child(
+                        button(
+                            "open-file",
+                            if d.protocol.folder_output() {
+                                "Open download folder"
+                            } else {
+                                "Open file"
+                            },
+                            Icon::Arrow,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
+                                reveal(&d.path());
+                            }
+                        })),
+                    )
+                })
+                .when(
+                    matches!(d.status, Status::Failed | Status::Paused),
+                    |actions| {
+                        actions.child(
+                            button("resume-selected", "Resume download", Icon::Play, true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.manager.resume(id);
+                                    cx.notify();
+                                })),
+                        )
+                    },
+                )
+                .when(d.status.active() || d.status == Status::Queued, |actions| {
+                    actions.child(
+                        button("pause-selected", "Pause download", Icon::Pause, true).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.manager.pause(id);
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                })
+                .when(
+                    !matches!(
+                        d.status,
+                        Status::Complete | Status::Cancelled | Status::Assembling
+                    ),
+                    |actions| {
+                        actions.child(
+                            button("cancel-selected", "Cancel transfer", Icon::Close, false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.manager.cancel(id);
+                                    cx.notify();
+                                })),
+                        )
+                    },
+                );
+        panel
+            .h(relative(0.30))
+            .min_h(px(180.))
+            .max_h(px(260.))
+            .child(
+                div()
+                    .h(px(44.))
+                    .flex_shrink_0()
+                    .px(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(RULE))
+                    .child(label("Transfer details", 13., MUTED))
+                    .child(actions),
+            )
+            .child(
+                div()
+                    .id("details-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .p(px(20.))
+                            .px(px(28.))
+                            .flex()
+                            .items_start()
+                            .gap(px(28.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.))
+                                    .child(
                                         label(d.name.clone(), 15., TEXT)
-                                            .font_weight(FontWeight::MEDIUM),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .child(div().size(px(6.)).bg(rgb(status_color(d.status))))
-                                .child(label(d.status.label(), 12., status_color(d.status))),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_end()
-                                .justify_between()
-                                .child(label(format!("{:.1}%", d.fraction() * 100.), 32., TEXT))
-                                .child(
-                                    label(
-                                        eta.map(|e| format!("{e} left"))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(label(
+                                                d.status.label(),
+                                                12.,
+                                                status_color(d.status),
+                                            ))
+                                            .child(label(
+                                                if d.total.is_some() {
+                                                    format!("{:.1}%", d.fraction() * 100.)
+                                                } else {
+                                                    "—".into()
+                                                },
+                                                14.,
+                                                TEXT,
+                                            )),
+                                    )
+                                    .child(progress(d.fraction(), status_color(d.status)))
+                                    .child(label(
+                                        format!(
+                                            "{} of {}",
+                                            bytes(d.downloaded),
+                                            d.total
+                                                .map(bytes)
+                                                .unwrap_or_else(|| "unknown size".into())
+                                        ),
+                                        12.,
+                                        MUTED,
+                                    ))
+                                    .child(label(
+                                        eta.map(|eta| format!("{eta} left"))
                                             .unwrap_or_else(|| "—".into()),
                                         12.,
                                         FAINT,
+                                    ))
+                                    .children(
+                                        d.error.as_ref().map(|error| {
+                                            label(error, 12., RED).line_height(px(20.))
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                label("Connections", 13., TEXT)
+                                                    .font_weight(FontWeight::MEDIUM),
+                                            )
+                                            .child(label(
+                                                format!("{:02}", d.parts.len()),
+                                                12.,
+                                                FAINT,
+                                            )),
                                     )
-                                    .pb(px(5.)),
-                                ),
-                        )
-                        .child(progress(d.fraction(), status_color(d.status)).w(px(width - 44.)))
-                        .child(label(
-                            format!(
-                                "{} of {}",
-                                bytes(d.downloaded),
-                                d.total.map(bytes).unwrap_or_else(|| "unknown size".into())
-                            ),
-                            12.,
-                            MUTED,
-                        ))
-                        .child(div().h(px(1.)).bg(rgb(RULE)).my(px(4.)))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    label("Connections", 14., TEXT).font_weight(FontWeight::MEDIUM),
-                                )
-                                .child(label(format!("{:02}", d.parts.len()), 12., FAINT)),
-                        )
-                        .child(label(
-                            if d.ranged {
-                                "Parallel transfer · byte-range supported"
-                            } else if d.parts.is_empty() {
-                                "Waiting for the server"
-                            } else {
-                                "Single connection · full-file transfer"
-                            },
-                            11.,
-                            FAINT,
-                        ))
-                        .children(d.parts.iter().enumerate().map(|(i, part)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(9.))
-                                .child(label(format!("{:02}", i + 1), 11., FAINT).w(px(19.)))
-                                .child(div().flex_1().child(progress(
-                                    if d.total.is_some() {
-                                        part.fraction()
-                                    } else {
-                                        0.
-                                    },
-                                    if d.status == Status::Paused {
-                                        AMBER
-                                    } else {
-                                        BLUE
-                                    },
-                                )))
-                                .child(
-                                    label(
-                                        if d.total.is_some() {
-                                            format!("{:.0}%", part.fraction() * 100.)
+                                    .child(label(
+                                        if d.ranged {
+                                            "Parallel transfer · byte-range supported"
+                                        } else if d.parts.is_empty() {
+                                            "Waiting for the server"
                                         } else {
-                                            "—".into()
+                                            "Single connection · full-file transfer"
                                         },
                                         11.,
                                         FAINT,
-                                    )
-                                    .w(px(34.))
-                                    .text_right(),
-                                )
-                        }))
-                        .children(d.error.clone().map(|error| {
-                            div()
-                                .p(px(12.))
-                                .bg(rgb(0x291c1e))
-                                .child(label(error, 12., RED).line_height(px(20.)))
-                        }))
-                        .child(div().h(px(1.)).bg(rgb(RULE)).my(px(4.)))
-                        .child(detail_line("Protocol", d.protocol.label()))
-                        .child(detail_line("Source", &d.host()))
-                        .child(detail_line("Destination", &d.path().display().to_string()))
-                        .child(
-                            button("copy-link", "Copy download link", Icon::Copy, false).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            d.url.clone(),
-                                        ));
-                                    }
-                                }),
-                            ),
-                        )
-                        .child(
-                            button("show-file", "Open folder", Icon::Folder, false).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
-                                        reveal(&d.directory);
-                                    }
-                                    cx.notify();
-                                }),
-                            ),
-                        )
-                        .when(d.status == Status::Complete, |panel| {
-                            panel.child(
-                                button(
-                                    "open-file",
-                                    if d.protocol.folder_output() {
-                                        "Open download folder"
-                                    } else {
-                                        "Open file"
-                                    },
-                                    Icon::Arrow,
-                                    true,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, _| {
-                                        if let Some(d) = this.downloads.iter().find(|d| d.id == id)
-                                        {
-                                            reveal(&d.path());
-                                        }
-                                    },
-                                )),
-                            )
-                        })
-                        .when(
-                            matches!(d.status, Status::Failed | Status::Paused),
-                            |panel| {
-                                panel.child(
-                                    button("resume-selected", "Resume download", Icon::Play, true)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.manager.resume(id);
-                                            cx.notify();
-                                        })),
-                                )
-                            },
-                        )
-                        .when(d.status.active() || d.status == Status::Queued, |panel| {
-                            panel.child(
-                                button("pause-selected", "Pause download", Icon::Pause, true)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.manager.pause(id);
-                                        cx.notify();
+                                    ))
+                                    .children(d.parts.iter().enumerate().map(|(i, part)| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(9.))
+                                            .child(
+                                                label(format!("{:02}", i + 1), 11., FAINT)
+                                                    .w(px(19.))
+                                                    .flex_shrink_0(),
+                                            )
+                                            .child(div().flex_1().min_w_0().child(progress(
+                                                if d.total.is_some() {
+                                                    part.fraction()
+                                                } else {
+                                                    0.
+                                                },
+                                                if d.status == Status::Paused {
+                                                    AMBER
+                                                } else {
+                                                    BLUE
+                                                },
+                                            )))
+                                            .child(
+                                                label(
+                                                    if d.total.is_some() {
+                                                        format!("{:.0}%", part.fraction() * 100.)
+                                                    } else {
+                                                        "—".into()
+                                                    },
+                                                    11.,
+                                                    FAINT,
+                                                )
+                                                .w(px(34.))
+                                                .text_right()
+                                                .flex_shrink_0(),
+                                            )
                                     })),
                             )
-                        })
-                        .when(
-                            !matches!(
-                                d.status,
-                                Status::Complete | Status::Cancelled | Status::Assembling
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.))
+                                    .child(detail_line("Protocol", d.protocol.label()))
+                                    .child(detail_line("Source", &d.host()))
+                                    .child(detail_line(
+                                        "Destination",
+                                        &d.path().display().to_string(),
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap(px(8.))
+                                            .child(
+                                                button(
+                                                    "copy-link",
+                                                    "Copy download link",
+                                                    Icon::Copy,
+                                                    false,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Some(d) =
+                                                        this.downloads.iter().find(|d| d.id == id)
+                                                    {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                d.url.clone(),
+                                                            ),
+                                                        );
+                                                    }
+                                                })),
+                                            )
+                                            .child(
+                                                button(
+                                                    "show-file",
+                                                    "Open folder",
+                                                    Icon::Folder,
+                                                    false,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Some(d) =
+                                                        this.downloads.iter().find(|d| d.id == id)
+                                                    {
+                                                        reveal(&d.directory);
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                            ),
+                                    ),
                             ),
-                            |panel| {
-                                panel.child(
-                                    button(
-                                        "cancel-selected",
-                                        "Cancel transfer",
-                                        Icon::Close,
-                                        false,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.manager.cancel(id);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            },
-                        ),
-                ),
-        )
+                    ),
+            )
     }
 
     fn settings(&self, cx: &mut Context<Self>) -> Div {
@@ -1332,7 +1389,9 @@ impl Render for Strata {
                                 d.child(self.topbar(cx)).child(self.settings(cx))
                             })
                             .when(self.view != View::Settings, |d| {
-                                d.child(self.topbar(cx)).child(self.queue(window, cx))
+                                d.child(self.topbar(cx))
+                                    .child(self.queue(window, cx))
+                                    .child(self.inspector(cx))
                             })
                             .children(
                                 self.manager
@@ -1347,8 +1406,7 @@ impl Render for Strata {
                                     label(message, 12., AMBER).px(px(28.)).py(px(10.))
                                 }),
                             ),
-                    )
-                    .when(self.view != View::Settings, |d| d.child(self.inspector(cx))),
+                    ),
             )
     }
 }
@@ -1367,13 +1425,24 @@ fn metric(title: &str, value: &str, color: u32) -> Div {
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(12.))
+        .gap(px(4.))
         .child(label(title, 12., FAINT))
         .child(
             label(value, 24., color)
                 .font_weight(FontWeight::MEDIUM)
                 .whitespace_nowrap(),
         )
+}
+
+fn table_row() -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .px(px(14.))
+        .border_b_1()
+        .border_color(rgb(RULE))
 }
 
 fn transport_input(title: &str, input: Entity<TextInput>) -> Div {
