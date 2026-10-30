@@ -144,6 +144,12 @@ pub struct Settings {
     pub connections: usize,
     #[serde(default)]
     pub transport: TransferOptions,
+    #[serde(default = "default_details_height")]
+    pub details_height: f32,
+}
+
+fn default_details_height() -> f32 {
+    240.
 }
 
 impl Default for Settings {
@@ -156,6 +162,7 @@ impl Default for Settings {
             directory: home.join("Downloads"),
             connections: 8,
             transport: TransferOptions::default(),
+            details_height: default_details_height(),
         }
     }
 }
@@ -475,6 +482,20 @@ impl Manager {
         for d in self.snapshots() {
             self.pause(d.id);
         }
+    }
+
+    pub fn remove(&self, id: u64) {
+        self.jobs.lock().unwrap().retain(|job| {
+            let mut data = job.data.lock().unwrap();
+            if data.id != id {
+                return true;
+            }
+            job.control.store(CANCEL, Ordering::SeqCst);
+            data.status = Status::Cancelled;
+            false
+        });
+        // Removing history never removes downloaded files or private partial data.
+        self.persist();
     }
 
     pub fn shutdown(&self) {
@@ -1006,4 +1027,26 @@ pub fn history_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("Strata")
         .join("history.json")
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn legacy_settings_default_panel_height_and_new_height_round_trips() {
+        let mut settings: Settings = serde_json::from_value(
+            serde_json::json!({ "directory": "Downloads", "connections": 8 }),
+        )
+        .unwrap();
+        assert_eq!(settings.details_height, 240.);
+        settings.details_height = 416.;
+        let saved = serde_json::to_vec(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Settings>(&saved)
+                .unwrap()
+                .details_height,
+            416.
+        );
+    }
 }

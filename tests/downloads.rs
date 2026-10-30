@@ -727,3 +727,29 @@ fn ytdlp_download_pause_and_resume_are_byte_exact() {
             .any(|line| line.starts_with("range: bytes=") && !line.starts_with("range: bytes=0-"))
     }));
 }
+
+#[test]
+fn deleting_entries_stops_active_work_and_preserves_files() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let finished = manager
+        .add(&server.url("/plain"), directory.path().into(), 1)
+        .unwrap();
+    let file = wait(&manager, finished, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(file.status, Status::Complete, "{:?}", file.error);
+    manager.remove(finished);
+    assert_eq!(std::fs::read(file.path()).unwrap(), *server.bytes);
+    let active = manager
+        .add(&server.url("/ranged"), directory.path().into(), 4)
+        .unwrap();
+    wait(&manager, active, |d| d.downloaded > 0);
+    manager.remove(active);
+    manager.shutdown();
+    assert!(manager.snapshots().is_empty());
+    assert!(Manager::new(history).unwrap().snapshots().is_empty());
+    assert_eq!(std::fs::read(file.path()).unwrap(), *server.bytes);
+}
