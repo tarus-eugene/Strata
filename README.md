@@ -25,9 +25,41 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 
 - Add an HTTP or HTTPS file link with **New download** or **Ctrl+N**. A valid link on the clipboard is filled in automatically. Press **Enter** to start.
 - Search with **Ctrl+F**. Select a row to inspect its individual connection lanes, progress, destination, and source.
-- Pause/resume individual downloads, pause all, or cancel a transfer. History survives closing the app. Running downloads reopen paused; they never silently restart.
+- Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides Strata to the system tray and keeps downloads running.** Click the tray icon or choose **Open Strata** from its right-click menu to restore it. Launching the app again also restores its existing window.
+- To fully exit, right-click the tray icon and choose **Quit Strata**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
 - Choose the download folder and 1, 4, 8, or 16 connections in Settings. Up to three downloads run simultaneously.
 - Open a finished file or its folder from the inspector. Strata never automatically opens downloaded files.
+- The custom title bar supports dragging, double-click maximize/restore, window snapping, minimize, and close. Its controls also work with keyboard focus.
+
+The tray icon is removed on quit and re-added after Windows Explorer restarts. If the notification area is unavailable, a visible message explains that closing will quit instead of hiding the only reachable window.
+
+## Chrome companion
+
+Connect the app once using **Settings → Chrome companion → Connect Chrome**, or run `.\install-browser.ps1`. Then load the extension into your Chrome profile:
+
+1. Open `chrome://extensions` and turn on **Developer mode**.
+2. Choose **Load unpacked** and select this project's `extension` folder.
+3. Pin **Strata — Download companion**. Open its popup to check the app connection and turn capture on or off.
+
+On another installation, build both executables with `.\run.ps1 build`, then use **Settings → Chrome companion → Connect Chrome**, or run:
+
+```powershell
+.\install-browser.ps1
+```
+
+Keep `strata.exe` and `strata-bridge.exe` in the same folder. If you move the executables, reconnect the bridge. For a release build, run `.\install-browser.ps1 -AppDirectory .\target\release`. Unregister it with `.\install-browser.ps1 -Uninstall`; this retains your downloads and history.
+
+With capture enabled, the extension pauses eligible HTTP/HTTPS file downloads, sends the URL, browser-provided filename, and referrer to Strata, and cancels Chrome's paused copy **only after the app confirms the download was saved to its queue**. If the native host is unavailable or the app refuses the request, Chrome resumes its own download. A suspended extension worker recovers its pending handoffs on restart.
+
+You can also right-click a file link and choose **Download with Strata**, or paste a URL into the popup. The app opens automatically for a download if it is closed. Checking connection status alone does not open it.
+
+The extension uses Manifest V3 with only `downloads`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in Strata.
+
+The bridge uses Chrome's [native messaging protocol](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and a local named pipe restricted to your Windows user and SYSTEM. The committed extension public key keeps its ID stable: `eaccbjfepcpidchboonodedpepgboolc`. Only that extension origin is allowed; messages are length-bounded and accept fixed actions, never commands.
+
+## Logo
+
+The layered downward mark represents parallel transfers arriving as one file. Editable artwork: `assets/brand/mark.svg` and `assets/brand/wordmark.svg`. The app embeds the SVG and Windows ICO; the extension ships matching PNGs. Regenerate the platform icons with `.\scripts\generate-icons.ps1`.
 
 ## How parallel downloading works
 
@@ -54,10 +86,16 @@ History and settings: `%LOCALAPPDATA%\Strata\history.json`. Partial files: `.str
 
 For portable storage or isolated testing, set `STRATA_DATA_DIR` to a directory before launching. It changes the history/settings location, not the destination of existing downloads.
 
-This first version handles direct file links. Browser interception, authenticated cookie import, video extraction, scheduling, speed limits, and dynamic redistribution of a slow connection's remaining range are outside its scope. Names come from the URL path; Content-Disposition names are not yet read. Cancellation stops the transfer and retains its partial files; remove the matching hidden parts folder manually if you no longer need it.
+This version handles direct file links and Chrome capture. Authenticated cookie import, video extraction, scheduling, speed limits, and dynamic redistribution of a slow connection's remaining range are outside its scope. Names come from Chrome when provided, or from the URL path; Content-Disposition names are not yet read directly by the app. Cancellation stops the transfer and retains its partial files; remove the matching hidden parts folder manually if you no longer need it.
 
 ## Checks
 
 The local HTTP test server verifies simultaneous range requests and byte-for-byte assembly, ordinary full-file fallback, empty files, pause/resume across manager restart, remote file changes, malformed range rejection, collision protection, filename sanitation, and range partitioning. It never downloads test files from the public internet.
+
+`node --test extension/background.test.js` checks capture ordering, failure recovery, capture-off behavior, private/unsafe URL exclusions, cancellation failures, and worker restart recovery. Rust also checks native-message framing, named-pipe handoff, filename/referrer forwarding, and rejecting a transfer when history cannot be persisted.
+
+Tray checks cover mouse and keyboard callback routing. The ignored `native_tray_hides_restores_and_cleans_up` test requires interactive Windows Explorer; it creates its own window and verifies native tray creation, restore, hide without destroying the window, and cleanup. It was also run successfully on Windows.
+
+End-to-end verification used an isolated Chromium profile: a real browser download was handed through the native host to the app, Chrome's copy was canceled after acceptance, and the app's 4 MiB file matched every source byte. With capture off, the next file completed in Chromium without creating an app transfer. The popup rendered its live connected state without script errors.
 
 The editable text input is adapted from GPUI's Apache-2.0 example; see `NOTICE` and `LICENSE-APACHE`.

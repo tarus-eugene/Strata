@@ -14,6 +14,10 @@ An IDM-like download manager with a beautiful, calm dark interface. Users add UR
 ## Capabilities and Constraints
 Split supported HTTP downloads into concurrent parts. Safely fall back when ranges are unavailable. Preserve partial downloads, avoid overwriting user files, and report failures clearly. Investigate GPUI text blur and apply supported mitigations.
 
+The user additionally requested a custom in-app title bar, a logo, and a Chrome extension that captures file downloads and funnels them to the desktop app. The implementation uses a per-user local native-messaging bridge and preserves Chrome downloads when handoff fails.
+
+The user requested close-to-tray behavior: closing the main window keeps the app and transfers running in the background. The tray icon restores it and provides an explicit Quit action.
+
 ## Brand Commitments
 The user approved a Windows-first, calm dark interface with pause/resume, history, and visible parallel connections. Strata is a working product name selected for this build.
 

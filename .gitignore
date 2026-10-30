@@ -3,5 +3,6 @@
 /.taste-skill/
 /.impeccable/
 /test-output/
+/dist/
 *.log
 *.pdb
