@@ -1669,11 +1669,16 @@ fn clamp_details_height(requested: f32, viewport: f32) -> f32 {
     requested.clamp(120., (viewport - 460.).max(120.))
 }
 
-fn segment_layout(parts: &[strata::engine::Part]) -> Vec<(f32, f32)> {
+fn segment_layout(parts: &[strata::engine::Part], known_size: bool) -> Vec<(f32, f32)> {
     let total: f64 = parts.iter().map(|part| part.len() as f64).sum();
     parts
         .iter()
-        .map(|part| ((part.len() as f64 / total) as f32, part.fraction()))
+        .map(|part| {
+            (
+                (part.len() as f64 / total) as f32,
+                if known_size { part.fraction() } else { 0. },
+            )
+        })
         .collect()
 }
 
@@ -1681,7 +1686,7 @@ fn segmented_progress(download: &Download) -> Div {
     let segments = if download.parts.is_empty() {
         vec![(1., download.fraction())]
     } else {
-        segment_layout(&download.parts)
+        segment_layout(&download.parts, download.total.is_some())
     };
     div()
         .w_full()
@@ -1902,20 +1907,34 @@ mod tests {
 
     #[test]
     fn segmented_progress_preserves_byte_positions_for_unequal_parts() {
-        let segments = segment_layout(&[
-            Part {
-                start: 0,
-                end: 99,
-                downloaded: 50,
-            },
-            Part {
-                start: 100,
-                end: 399,
-                downloaded: 300,
-            },
-        ]);
+        let segments = segment_layout(
+            &[
+                Part {
+                    start: 0,
+                    end: 99,
+                    downloaded: 50,
+                },
+                Part {
+                    start: 100,
+                    end: 399,
+                    downloaded: 300,
+                },
+            ],
+            true,
+        );
         assert_eq!(segments, vec![(0.25, 0.5), (0.75, 1.)]);
-        assert!(segment_layout(&[]).is_empty());
+        assert!(segment_layout(&[], true).is_empty());
+        assert_eq!(
+            segment_layout(
+                &[Part {
+                    start: 0,
+                    end: 0,
+                    downloaded: 8192
+                }],
+                false
+            ),
+            vec![(1., 0.)]
+        );
     }
 
     #[test]

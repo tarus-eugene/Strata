@@ -37,7 +37,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\Strata-Setup-0.1.2-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\Strata-Setup-0.1.3-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
 
