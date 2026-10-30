@@ -48,11 +48,27 @@ try {
     $mutex = [Threading.Mutex]::new($false, 'Local\Strata.DownloadManager')
     try { Run-Setup 'running-app.log' $false } finally { $mutex.Dispose() }
     Run-Setup 'install.log'
-    foreach ($file in @('strata.exe','strata-bridge.exe','vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','extension/manifest.json','extension/background.js','extension/icons/strata-128.png','extension/setup.html','LICENSE','LICENSE-APACHE','NOTICE')) {
+    foreach ($file in @('strata.exe','strata-bridge.exe','strata-cli.exe','tools/yt-dlp.exe','tools/deno.exe','tools/ffmpeg.exe','tools/ffprobe.exe','tools/README.md','vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','extension/manifest.json','extension/background.js','extension/icons/strata-128.png','extension/setup.html','LICENSE','LICENSE-APACHE','NOTICE')) {
         if (-not (Test-Path -LiteralPath (Join-Path $destination $file))) { throw "Installer omitted $file" }
     }
     if (Test-Path -LiteralPath (Join-Path $destination 'extension/background.test.js')) { throw 'Developer tests leaked into the installer.' }
     if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Start menu shortcut missing.' }
+    foreach ($name in @('strata-cli','yt-dlp','deno','ffmpeg','ffprobe')) {
+        $folder = if ($name -eq 'strata-cli') { $destination } else { Join-Path $destination 'tools' }
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = Join-Path $folder "$name.exe"
+        $start.Arguments = if ($name -in @('ffmpeg','ffprobe')) { '-version' } else { '--version' }
+        $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+        $start.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$destination;$(Join-Path $destination 'tools')"
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "Installed $name did not start in time." }
+            $stdout.GetAwaiter().GetResult() | Out-Null; $stderr.GetAwaiter().GetResult() | Out-Null
+            if ($process.ExitCode -ne 0) { throw "Installed $name failed to start: $($process.ExitCode)" }
+        } finally { $process.Dispose() }
+    }
     $manifestPath = Join-Path $destination "browser/$hostName.json"
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.path -ne (Join-Path $destination 'strata-bridge.exe')) { throw 'Installed bridge path is incorrect.' }
@@ -81,7 +97,7 @@ try {
             } elseif ($key) { throw "Uninstall retained its own registry key: $path" }
         } finally { if ($key) { $key.Dispose() } }
     }
-    Write-Output 'PASS: running-app protection, install, upgrade, runtime payload, browser registration, shortcuts, ownership-safe uninstall, and retained user data.'
+    Write-Output 'PASS: running-app protection, install, upgrade, installed CLI/media helper startup, runtime payload, browser registration, shortcuts, ownership-safe uninstall, and retained user data.'
 } finally {
     try { Uninstall-Test } finally {
         foreach ($path in $saved.Keys) {

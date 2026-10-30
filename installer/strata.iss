@@ -35,7 +35,10 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 [Files]
 Source: "{#PayloadDir}\strata.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\strata-bridge.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\strata-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\runtime\*.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\runtime\*.dll"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "{#PayloadDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\NOTICE"; DestDir: "{app}"; Flags: ignoreversion

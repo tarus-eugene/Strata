@@ -3,3 +3,8 @@ GPUI 0.2.2 examples/input.rs, copyright Zed Industries and contributors,
 licensed under the Apache License, Version 2.0.
 https://github.com/zed-industries/zed
 https://www.apache.org/licenses/LICENSE-2.0
+
+Bundled yt-dlp, FFmpeg, and Deno are separate programs with their own licenses.
+Their notices and corresponding source/build links are included in tools/licenses
+and tools/README.md in the installed application. Versions and artifact hashes
+are recorded in resources/media-tools.json in this source repository.

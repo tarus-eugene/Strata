@@ -1,6 +1,6 @@
 # Strata
 
-A native Windows download manager written in Rust and GPUI. A calm dark queue, live transfer details, and real parallel HTTP downloads.
+A native Windows download manager written in Rust and GPUI. A calm dark queue with parallel HTTP transfers, FTP, SFTP, WebDAV, native torrents, verified Metalinks, and video downloads through yt-dlp.
 
 ## Run
 
@@ -23,7 +23,7 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 
 ## Using Strata
 
-- Add an HTTP or HTTPS file link with **New download** or **Ctrl+N**. A valid link on the clipboard is filled in automatically. Press **Enter** to start.
+- Add a URL or magnet with **New download** or **Ctrl+N**. A valid source on the clipboard is filled in automatically. **Open torrent / Metalink file** selects a local descriptor. Press **Enter** to start.
 - Search with **Ctrl+F**. Select a row to inspect its individual connection lanes, progress, destination, and source.
 - Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides Strata to the system tray and keeps downloads running.** Click the tray icon or choose **Open Strata** from its right-click menu to restore it. Launching the app again also restores its existing window.
 - To fully exit, right-click the tray icon and choose **Quit Strata**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
@@ -35,7 +35,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\Strata-Setup-0.1.0-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, local browser bridge, Visual C++ runtime DLLs, browser extension, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\Strata-Setup-0.1.0-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
 
@@ -45,7 +45,54 @@ To rebuild the installer, install [Inno Setup](https://jrsoftware.org/isdl.php) 
 .\scripts\package-installer.ps1
 ```
 
-This builds both release executables and writes a versioned setup EXE, SHA-256 file, and `strata-browser-extension.zip` to `dist`. Use `-SkipBuild` to package an existing release build, `-CompilerPath` for a custom `ISCC.exe`, or `-RuntimeDirectory` for the x64 `Microsoft.VC*.CRT` redistributable folder. Build staging stays under the ignored `.tools` directory. No Rust toolchain is needed on the computer where Strata is installed. The setup EXE is currently unsigned.
+This builds the release executables and writes a versioned setup EXE, SHA-256 file, and `strata-browser-extension.zip` to `dist`. Use `-SkipBuild` to package an existing release build, `-CompilerPath` for a custom `ISCC.exe`, or `-RuntimeDirectory` for the x64 `Microsoft.VC*.CRT` redistributable folder. Build staging stays under the ignored `.tools` directory. No Rust toolchain is needed on the computer where Strata is installed. The setup EXE is currently unsigned.
+
+Media helpers are downloaded from their official release repositories and checked against the sizes and SHA-256 hashes in `resources/media-tools.json`. The installed `tools` folder includes their licenses and source/build links. Use `scripts/fetch-media-tools.ps1` to prepare the development cache; source debug builds also discover that cache. Media helpers can alternatively be placed beside the app in `tools` or on PATH. The first installer build needs network access to fetch these assets.
+
+## Protocols and command line
+
+The GUI detects protocols from URLs and descriptor filenames. `strata-cli.exe` accepts the same sources and adds explicit protocol flags. It queues the transfer in the desktop app, starting the app if necessary; it does not launch a separate downloader queue.
+
+| Protocol | Detection / override | Behavior |
+| --- | --- | --- |
+| HTTP / HTTPS | Automatic | Parallel ranges, safe resume, original file bytes; HTTP, HTTPS, SOCKS5 and SOCKS5h proxies |
+| FTP | `ftp://` or `--ftp` | Anonymous or authenticated binary transfer; REST resume |
+| SFTP | `sftp://` or `--sftp` | Password or OpenSSH private key; strict known-host verification; seek resume |
+| WebDAV | `webdav://`, `webdavs://` or `--webdav` | HTTP(S) GET with URL-provided Basic authentication; normal HTTP range behavior |
+| BitTorrent | Magnet or `.torrent` file / URL | Native `librqbit` through the `torrent-native` Cargo feature; v1 / hybrid torrents, DHT, trackers, piece checks and partial-file rechecking |
+| Metalink | `.meta4`, `.metalink` or `--metalink` | v3 and v4; ordered mirror failover, SHA-256 / SHA-512 / MD5 whole-file checks, multiple files |
+| Video sites | Known video host or `--ytdlp` | yt-dlp extraction; FFmpeg merges and Deno supports JavaScript challenges |
+
+```powershell
+.\strata-cli.exe https://example.com/large.zip --connections 8
+.\strata-cli.exe https://example.com/large.zip --proxy socks5h://localhost:1080
+.\strata-cli.exe --ftp ftp.example.com/pub/file.zip
+.\strata-cli.exe --sftp alice@example.com/archive.zip --identity C:\Users\alice\.ssh\id_ed25519
+.\strata-cli.exe --webdav https://alice:password@example.com/archive.zip
+.\strata-cli.exe 'magnet:?xt=urn:btih:YOUR_INFO_HASH'
+.\strata-cli.exe C:\Downloads\release.torrent
+.\strata-cli.exe --metalink https://example.com/release.meta4
+.\strata-cli.exe --ytdlp https://www.youtube.com/watch?v=VIDEO_ID
+```
+
+Installed executables are under `%LOCALAPPDATA%\Programs\Strata` by default. Source builds use `target\debug` or `target\release`. `strata.exe` also accepts the transfer flags; the console CLI provides visible command-line errors and queue IDs.
+
+Use `--user`, `--password-stdin`, `--identity`, `--key-passphrase-stdin`, `--known-hosts`, `--directory`, and `--connections` for explicit options. For a password without putting it in shell history:
+
+```powershell
+$credential = Get-Credential -UserName alice
+$credential.GetNetworkCredential().Password | .\strata-cli.exe sftp://alice@example.com/archive.zip --password-stdin
+```
+
+URL passwords, private-key passphrases, and proxy passwords are protected with Windows DPAPI for your current Windows account before history is saved. Source links omit user information. These credentials cannot be decrypted by another Windows account; re-enter them after moving history to a different account or machine. URL query parameters are retained as part of the download link.
+
+SFTP uses `%USERPROFILE%\.ssh\known_hosts` by default and refuses unknown, changed, or revoked keys. Verify the host fingerprint with the server administrator, connect with OpenSSH to record the verified key, or supply `--known-hosts`. Settings can select a private key / known-hosts file and configure the HTTP proxy. Explicitly pinned host keys are supported; CA-only known-hosts entries do not authorize an unpinned key. Encrypted private keys accept `--key-passphrase-stdin`.
+
+Torrent, Metalink, and video jobs publish a download folder. They stage files privately and do not replace an existing destination. Native torrents upload while active and stop seeding on completion or pause. Resume rechecks existing pieces. Metalink descriptors are limited to 8 MiB / 1024 files, reject unsafe paths and XML DTDs, and require a supported whole-file checksum for each file. A bad mirror or checksum is tried against the next mirror; no unverified file is published.
+
+Video hosts automatically recognized include YouTube, Vimeo, Twitch, TikTok, and Instagram, including their subdomains; `--ytdlp` selects the extractor for other supported sites. Site changes, login requirements, DRM, and availability can prevent an extraction. Browser cookies are not exported automatically. Pause stops the media process tree and retains resumable files.
+
+The `torrent-native` feature is enabled by default and included in the installer. To omit it, run `.\run.ps1 build -CargoArguments @('--no-default-features')`. `run.ps1` forwards `-CargoArguments` to Cargo for targeted tests and feature checks.
 
 ## Chromium browser companion
 
@@ -102,11 +149,13 @@ History and settings: `%LOCALAPPDATA%\Strata\history.json`. Partial files: `.str
 
 For portable storage or isolated testing, set `STRATA_DATA_DIR` to a directory before launching. It changes the history/settings location, not the destination of existing downloads.
 
-This version handles direct file links and Chrome capture. Authenticated cookie import, video extraction, scheduling, speed limits, and dynamic redistribution of a slow connection's remaining range are outside its scope. Names come from Chrome when provided, or from the URL path; Content-Disposition names are not yet read directly by the app. Cancellation stops the transfer and retains its partial files; remove the matching hidden parts folder manually if you no longer need it.
+Authenticated browser-cookie import, scheduling, speed limits, and dynamic redistribution of a slow HTTP connection's remaining range are outside this version's scope. Direct-file names come from the browser when provided, or from the URL path; Content-Disposition names are not yet read directly by the app. Cancellation stops the transfer and retains its partial files; remove the matching hidden parts folder manually if you no longer need it.
 
 ## Checks
 
 The local HTTP test server verifies simultaneous range requests and byte-for-byte assembly, ordinary full-file fallback, empty files, pause/resume across manager restart, remote file changes, malformed range rejection, collision protection, filename sanitation, and range partitioning. It never downloads test files from the public internet.
+
+Loopback transport tests verify WebDAV authentication, authenticated SOCKS5 with remote DNS, HTTP proxy routing, FTP anonymous/password authentication and REST resume, SFTP password/key authentication and resume, and Metalink mirror recovery after checksum failure. A real local BitTorrent seed verifies `.torrent` and magnet transfers and rechecking existing partial data. Host-key tests reject unknown, changed, and revoked keys. Credential tests check protected persistence and diagnostic redaction. The optional `ytdlp_download_pause_and_resume_are_byte_exact` test uses the pinned helper against a local media fixture; run it with `.\run.ps1 test -CargoArguments @('--test','downloads','ytdlp_download_pause_and_resume_are_byte_exact','--','--ignored','--exact')`.
 
 `node --test extension/background.test.js` checks capture ordering, failure recovery, capture-off behavior, private/unsafe URL exclusions, cancellation failures, and worker restart recovery. Rust also checks native-message framing, named-pipe handoff, filename/referrer forwarding, and rejecting a transfer when history cannot be persisted.
 
@@ -114,6 +163,6 @@ Tray checks cover mouse and keyboard callback routing. The ignored `native_tray_
 
 End-to-end verification used isolated Chromium and Brave profiles: a real browser download was handed through the native host to the app, the browser's copy was canceled after acceptance, and the app's 4 MiB file matched every source byte. With capture off, the next file completed in the browser without creating an app transfer. The popup rendered its live connected state without script errors. Brave was checked against the optimized release app.
 
-`scripts/test-installer.ps1` exercises the real setup EXE in a directory with spaces: running-app protection, install, repeat-install upgrade, runtime and extension payloads, Start menu shortcut, native host registrations, and uninstall. It checks that unrelated data remains and a bridge registration belonging to a different installation survives. Use a Windows account without an existing installed Strata or Strata Start menu shortcut; quit any running copy first. The test snapshots and restores existing native host registrations and leaves diagnostic logs under `.tools/installer-test`.
+`scripts/test-installer.ps1` exercises the real setup EXE in a directory with spaces: running-app protection, install, repeat-install upgrade, runtime and extension payloads, Start menu shortcut, native host registrations, and uninstall. It starts the installed CLI and each media helper with a restricted PATH, checks that unrelated data remains, and verifies that a bridge registration belonging to a different installation survives. Use a Windows account without an existing installed Strata or Strata Start menu shortcut; quit any running copy first. The test snapshots and restores existing native host registrations and leaves diagnostic logs under `.tools/installer-test`.
 
 The editable text input is adapted from GPUI's Apache-2.0 example; see `NOTICE` and `LICENSE-APACHE`.

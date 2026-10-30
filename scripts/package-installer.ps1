@@ -46,7 +46,7 @@ if ($extensionVersion -ne $version) { throw 'The extension and app versions must
 $stage = Join-Path $root ('.tools/installer-payload/' + [guid]::NewGuid().ToString('N'))
 $runtime = Join-Path $stage 'runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-foreach ($name in @('strata.exe','strata-bridge.exe')) {
+foreach ($name in @('strata.exe','strata-bridge.exe','strata-cli.exe')) {
     Copy-Item -LiteralPath (Join-Path $root "target/release/$name") -Destination $stage
 }
 foreach ($name in @('LICENSE','LICENSE-APACHE','NOTICE')) {
@@ -54,6 +54,7 @@ foreach ($name in @('LICENSE','LICENSE-APACHE','NOTICE')) {
 }
 Copy-Item -LiteralPath (Join-Path $root 'assets/brand/strata.ico') -Destination $stage
 Get-ChildItem -LiteralPath $RuntimeDirectory -Filter '*.dll' -File | Copy-Item -Destination $runtime
+& (Join-Path $PSScriptRoot 'fetch-media-tools.ps1') -Destination (Join-Path $stage 'tools') | Out-Host
 & (Join-Path $PSScriptRoot 'package-extension.ps1') | Out-Host
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $root 'dist/strata-browser-extension.zip'), (Join-Path $stage 'extension'))

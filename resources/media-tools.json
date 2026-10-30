@@ -1,0 +1,28 @@
+[
+  {
+    "name": "yt-dlp",
+    "version": "2026.10.26",
+    "size": 23575744,
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
+    "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
+    "license": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.10.26/LICENSE",
+    "source": "https://github.com/yt-dlp/yt-dlp/tree/2026.10.26"
+  },
+  {
+    "name": "deno",
+    "version": "2.9.8",
+    "size": 42917472,
+    "url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip",
+    "sha256": "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf",
+    "license": "https://raw.githubusercontent.com/denoland/deno/v2.9.8/LICENSE.md",
+    "source": "https://github.com/denoland/deno/tree/v2.9.8"
+  },
+  {
+    "name": "ffmpeg",
+    "version": "N-128201-g5385979def",
+    "size": 90919095,
+    "url": "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobuild-2026-10-29-23-03/ffmpeg-N-128201-g5385979def-win64-gpl-shared.zip",
+    "sha256": "9d87d5d1bd38d7e8e812330feac310aef9f57bd8a61d333e0e6b90ef75db9370",
+    "source": "https://github.com/yt-dlp/FFmpeg-Builds/tree/autobuild-2026-10-29-23-03"
+  }
+]
