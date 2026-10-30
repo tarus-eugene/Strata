@@ -23,9 +23,11 @@ The user requested close-to-tray behavior: closing the main window keeps the app
 The protocol scope also includes HTTP(S) / SOCKS5 proxying, FTP REST resume, SFTP password/key authentication with known-host verification, WebDAV Basic auth, native v1/hybrid BitTorrent and magnets, checksum-verified Metalink v3/v4 mirrors, and video extraction through yt-dlp. Protocols are detected in the GUI and can be forced by the companion CLI. URL and proxy passwords and key passphrases are protected with Windows DPAPI. Multi-file outputs are staged and published without replacing user data. The installer bundles the CLI and pinned media helpers.
 
 ## Brand Commitments
-The download table fills the window without a left sidebar, workspace label, or breadcrumbs. Filters and Settings live in the top toolbar. Row menus expose contextual actions; deleting an entry preserves files. A draggable bottom inspector remembers its height and uses one byte-weighted segmented progress bar. Automatic browser captures open or restore Strata after acceptance.
+The download table fills the window without a left sidebar, workspace label, or breadcrumbs. Filters and Settings live in the top toolbar. Row menus expose contextual actions; Delete from device permanently removes owned output and partial data after writes stop. A draggable bottom inspector remembers its height and uses one byte-weighted segmented progress bar. Automatic browser captures open or restore Strata after acceptance.
 
 The user approved a Windows-first, calm dark interface with pause/resume, history, and visible parallel connections. Strata is a working product name selected for this build.
 
 ## Evidence on Hand
 The workspace was empty. No existing assets or download history. Empty states must show honest zeros; preview data must be clearly identified.
+
+New download is a centered modal with keyboard focus containment. The queue includes ETA and omits transfer summary cards. Its empty detail prompt is centered. Native inputs share blinking carets. The browser companion suppresses download UI while capturing, waits for filename determination, and the app recovers server-provided names before final publication.

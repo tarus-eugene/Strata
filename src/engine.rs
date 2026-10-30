@@ -20,8 +20,10 @@ use tokio::{
 };
 use url::Url;
 
+mod deletion;
 mod ftp;
 mod metalink;
+mod naming;
 mod sftp;
 mod tools;
 #[cfg(feature = "torrent-native")]
@@ -45,6 +47,7 @@ pub enum Status {
     Complete,
     Failed,
     Cancelled,
+    Deleting,
 }
 
 impl Status {
@@ -59,6 +62,7 @@ impl Status {
             Self::Complete => "Completed",
             Self::Failed => "Failed",
             Self::Cancelled => "Cancelled",
+            Self::Deleting => "Deleting",
         }
     }
     pub fn active(self) -> bool {
@@ -109,6 +113,10 @@ pub struct Download {
     pub protocol: Protocol,
     #[serde(default)]
     pub options: TransferOptions,
+    #[serde(default)]
+    pub preserve_name: bool,
+    #[serde(default)]
+    pub owns_output: bool,
 }
 
 impl Download {
@@ -171,6 +179,8 @@ struct Job {
     data: Mutex<Download>,
     control: Arc<AtomicU8>,
     running: AtomicBool,
+    name_hint: Mutex<Option<naming::FilenameHint>>,
+    deleting: AtomicBool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -211,6 +221,16 @@ impl Manager {
         let jobs = downloads
             .into_iter()
             .map(|mut data| {
+                if data.status == Status::Complete {
+                    data.owns_output = true;
+                }
+                if data.status == Status::Deleting {
+                    data.status = Status::Failed;
+                    data.error = Some(
+                        "Deletion was interrupted. Choose Delete from device again to finish."
+                            .into(),
+                    );
+                }
                 if data.status.active() || data.status == Status::Queued {
                     data.status = Status::Paused;
                 }
@@ -218,6 +238,8 @@ impl Manager {
                     data: Mutex::new(data),
                     control: Arc::new(AtomicU8::new(PAUSE)),
                     running: AtomicBool::new(false),
+                    name_hint: Mutex::new(None),
+                    deleting: AtomicBool::new(false),
                 })
             })
             .collect();
@@ -366,6 +388,9 @@ impl Manager {
         ensure!(directory.is_dir(), "Choose an existing download folder.");
         let mut jobs = self.jobs.lock().unwrap();
         let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+        let preserve_name = suggested_name
+            .as_ref()
+            .is_some_and(|name| !naming::generated_name(name));
         let base = if source.protocol.folder_output() {
             let name = if let Some(name) = &suggested_name {
                 name.clone()
@@ -413,9 +438,13 @@ impl Manager {
                 referrer,
                 protocol: source.protocol,
                 options: source.options,
+                preserve_name,
+                owns_output: false,
             }),
             control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
+            name_hint: Mutex::new(None),
+            deleting: AtomicBool::new(false),
         });
         jobs.push(job.clone());
         drop(jobs);
@@ -433,22 +462,17 @@ impl Manager {
 
     pub fn resume(self: &Arc<Self>, id: u64) {
         if let Some(job) = self.find(id) {
-            if job.running.load(Ordering::SeqCst) {
+            let mut data = job.data.lock().unwrap();
+            if job.running.load(Ordering::SeqCst) || job.deleting.load(Ordering::SeqCst) {
                 return;
             }
-            if matches!(
-                job.data.lock().unwrap().status,
-                Status::Complete | Status::Cancelled
-            ) {
+            if matches!(data.status, Status::Complete | Status::Cancelled) {
                 return;
             }
             job.control.store(RUN, Ordering::SeqCst);
-            {
-                let mut d = job.data.lock().unwrap();
-                d.status = Status::Queued;
-                d.error = None;
-            }
-            self.launch(job);
+            data.status = Status::Queued;
+            data.error = None;
+            self.launch(job.clone());
         }
     }
 
@@ -468,6 +492,9 @@ impl Manager {
     pub fn cancel(&self, id: u64) {
         if let Some(job) = self.find(id) {
             let mut d = job.data.lock().unwrap();
+            if job.deleting.load(Ordering::SeqCst) {
+                return;
+            }
             if d.status == Status::Complete || d.status == Status::Assembling {
                 return;
             }
@@ -484,20 +511,6 @@ impl Manager {
         }
     }
 
-    pub fn remove(&self, id: u64) {
-        self.jobs.lock().unwrap().retain(|job| {
-            let mut data = job.data.lock().unwrap();
-            if data.id != id {
-                return true;
-            }
-            job.control.store(CANCEL, Ordering::SeqCst);
-            data.status = Status::Cancelled;
-            false
-        });
-        // Removing history never removes downloaded files or private partial data.
-        self.persist();
-    }
-
     pub fn shutdown(&self) {
         self.pause_all();
         // Wait for writes to settle before the process exits so part lengths remain resumable.
@@ -507,7 +520,7 @@ impl Manager {
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|j| !j.running.load(Ordering::SeqCst))
+                .all(|j| !j.running.load(Ordering::SeqCst) && !j.deleting.load(Ordering::SeqCst))
             {
                 break;
             }
@@ -554,13 +567,17 @@ impl Manager {
             let result = manager.execute(&job).await;
             {
                 let mut d = job.data.lock().unwrap();
-                match job.control.load(Ordering::SeqCst) {
-                    CANCEL if d.status != Status::Complete => d.status = Status::Cancelled,
-                    PAUSE if d.status != Status::Complete => d.status = Status::Paused,
-                    _ => {
-                        if let Err(e) = result {
-                            d.status = Status::Failed;
-                            d.error = Some(format!("{e:#}"));
+                if job.deleting.load(Ordering::SeqCst) {
+                    d.status = Status::Deleting;
+                } else {
+                    match job.control.load(Ordering::SeqCst) {
+                        CANCEL if d.status != Status::Complete => d.status = Status::Cancelled,
+                        PAUSE if d.status != Status::Complete => d.status = Status::Paused,
+                        _ => {
+                            if let Err(e) = result {
+                                d.status = Status::Failed;
+                                d.error = Some(format!("{e:#}"));
+                            }
                         }
                     }
                 }
@@ -616,6 +633,8 @@ impl Manager {
             probe.error_for_status_ref()?;
         }
         ensure_identity(&probe)?;
+        *job.name_hint.lock().unwrap() = naming::response_name(&probe, &initial);
+        self.adopt_response_name(job)?;
         let range = probe
             .headers()
             .get(header::CONTENT_RANGE)
@@ -697,6 +716,7 @@ impl Manager {
             return Err(e);
         }
         check_running(job)?;
+        self.adopt_response_name(job)?;
         let d = job.data.lock().unwrap().clone();
         ensure!(
             d.total.is_none_or(|n| n == d.downloaded),
@@ -721,6 +741,7 @@ impl Manager {
             let mut data = job.data.lock().unwrap();
             data.total = Some(data.downloaded);
             data.status = Status::Complete;
+            data.owns_output = true;
             data.error = None;
         }
         // This directory is exclusively owned by this transfer and contains only its parts.
@@ -793,6 +814,15 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
     };
     response.error_for_status_ref()?;
     ensure_identity(&response)?;
+    if let Some(candidate) = naming::response_name(&response, &d) {
+        let mut hint = job.name_hint.lock().unwrap();
+        if hint
+            .as_ref()
+            .is_none_or(|prior| candidate.priority > prior.priority)
+        {
+            *hint = Some(candidate);
+        }
+    }
     if d.ranged {
         ensure!(
             response.status() == StatusCode::PARTIAL_CONTENT,
@@ -971,7 +1001,7 @@ fn sanitize_filename(decoded: &str) -> String {
     let mut name: String = decoded
         .chars()
         .map(|c| {
-            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}') || "<>:\"/\\|?*".contains(c) {
                 '_'
             } else {
                 c

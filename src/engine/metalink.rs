@@ -275,10 +275,14 @@ impl Manager {
                         referrer: None,
                         protocol: source.protocol,
                         options: source.options.clone(),
+                        preserve_name: true,
+                        owns_output: false,
                     });
                 data.id = parent.id;
                 data.directory = work.clone();
                 data.name = "payload".into();
+                data.preserve_name = true;
+                data.owns_output = false;
                 data.protocol = source.protocol;
                 data.options = source.options;
                 if data.path().exists() {
@@ -288,6 +292,8 @@ impl Manager {
                     data: Mutex::new(data),
                     control: job.control.clone(),
                     running: AtomicBool::new(true),
+                    name_hint: Mutex::new(None),
+                    deleting: AtomicBool::new(false),
                 });
                 let result = {
                     let transfer = async {

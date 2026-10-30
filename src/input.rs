@@ -1,6 +1,8 @@
 // Adapted from GPUI 0.2.2 examples/input.rs (Apache-2.0; Zed Industries).
 #![allow(unused_imports)]
+use gpui::{Subscription, Task};
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
@@ -42,12 +44,26 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    cursor_visible: bool,
+    cursor_reset: Instant,
+    blink_task: Option<Task<()>>,
+    _focus_subscription: Subscription,
+    _blur_subscription: Subscription,
 }
 
 impl TextInput {
-    pub fn new(placeholder: &str, cx: &mut Context<Self>) -> Self {
+    pub fn new(placeholder: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let on_focus = cx.on_focus(&focus_handle, window, |this, window, cx| {
+            this.start_blink(window, cx)
+        });
+        let on_blur = cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.blink_task = None;
+            this.cursor_visible = false;
+            cx.notify();
+        });
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             content: "".into(),
             placeholder: placeholder.to_owned().into(),
             selected_range: 0..0,
@@ -56,7 +72,47 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            cursor_visible: true,
+            cursor_reset: Instant::now(),
+            blink_task: None,
+            _focus_subscription: on_focus,
+            _blur_subscription: on_blur,
         }
+    }
+
+    fn reset_cursor(&mut self) {
+        self.cursor_reset = Instant::now();
+        self.cursor_visible = true;
+    }
+
+    fn start_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_cursor();
+        cx.notify();
+        let Some(period) = caret_blink_interval() else {
+            return;
+        };
+        self.blink_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period / 2).await;
+                let focused = this.update_in(cx, |this, window, cx| {
+                    if !this.focus_handle.is_focused(window) {
+                        return false;
+                    }
+                    if !window.is_window_active() {
+                        return true;
+                    }
+                    let visible = caret_visible(this.cursor_reset.elapsed(), period);
+                    if visible != this.cursor_visible {
+                        this.cursor_visible = visible;
+                        cx.notify();
+                    }
+                    true
+                });
+                if !focused.unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
     }
 
     pub fn value(&self) -> &str {
@@ -64,6 +120,7 @@ impl TextInput {
     }
 
     pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.reset_cursor();
         self.content = value.to_owned().into();
         self.selected_range = value.len()..value.len();
         self.marked_range = None;
@@ -194,6 +251,7 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.reset_cursor();
         self.selected_range = offset..offset;
         cx.notify()
     }
@@ -225,6 +283,7 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.reset_cursor();
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -337,6 +396,7 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reset_cursor();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -359,6 +419,7 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reset_cursor();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -590,6 +651,8 @@ impl Element for TextElement {
             .unwrap();
 
         if focus_handle.is_focused(window)
+            && window.is_window_active()
+            && (self.input.read(cx).cursor_visible || self.input.read(cx).marked_range.is_some())
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
@@ -644,5 +707,36 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+fn caret_blink_interval() -> Option<Duration> {
+    #[cfg(windows)]
+    let millis = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+    #[cfg(not(windows))]
+    let millis = 530_u32;
+    match millis {
+        u32::MAX => None,
+        0 => Some(Duration::from_millis(530)),
+        value => Some(Duration::from_millis(value.into())),
+    }
+}
+
+fn caret_visible(elapsed: Duration, period: Duration) -> bool {
+    (elapsed.as_nanos() / period.as_nanos().max(1)).is_multiple_of(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caret_visible;
+    use std::time::Duration;
+
+    #[test]
+    fn caret_blinks_and_is_visible_immediately_after_a_reset() {
+        let period = Duration::from_millis(500);
+        assert!(caret_visible(Duration::ZERO, period));
+        assert!(!caret_visible(Duration::from_millis(500), period));
+        assert!(caret_visible(Duration::from_millis(1000), period));
+        assert!(!caret_visible(Duration::from_millis(1750), period));
     }
 }

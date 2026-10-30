@@ -104,6 +104,10 @@ fn serve(
     }
     let request = String::from_utf8_lossy(&request).to_lowercase();
     requests.lock().unwrap().push(request.clone());
+    if request.contains("/name-redirect/") {
+        stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /Readable-report.pdf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+        return Ok(());
+    }
     let plain = request.contains("/plain");
     let bad = request.contains("/bad");
     let empty = request.contains("/empty");
@@ -156,6 +160,15 @@ fn serve(
     }
     if request.contains("/video.mp4") {
         headers += "Content-Type: video/mp4\r\n";
+    }
+    if request.contains("/name-early/") {
+        headers += "Content-Disposition: attachment; filename=report.pdf; filename*=UTF-8''Quarterly%20caf%C3%A9%20report.pdf\r\n";
+    }
+    if request.contains("/name-late/") && range != Some("0-0") {
+        headers += "Content-Disposition: attachment; filename=\"Quarterly; final report.pdf\"\r\n";
+    }
+    if request.contains("/name-late/") || request.contains("/type-only/") {
+        headers += "Content-Type: application/pdf\r\n";
     }
     stream.write_all(format!("{headers}\r\n").as_bytes())?;
     if total > 0 {
@@ -728,28 +741,235 @@ fn ytdlp_download_pause_and_resume_are_byte_exact() {
     }));
 }
 
+fn wait_removed(manager: &Manager, id: u64) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while let Some(download) = manager.snapshots().into_iter().find(|d| d.id == id) {
+        assert_ne!(download.status, Status::Failed, "{:?}", download.error);
+        assert!(Instant::now() < deadline, "Deletion did not finish");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
-fn deleting_entries_stops_active_work_and_preserves_files() {
+fn deleting_entries_stops_writes_and_removes_only_their_downloaded_data() {
     let server = Server::new();
     let directory = tempfile::tempdir().unwrap();
     let history = directory.path().join("history.json");
+    let sentinel = directory.path().join("unrelated.txt");
+    std::fs::write(&sentinel, "keep me").unwrap();
     let manager = Manager::new(history.clone()).unwrap();
-    let finished = manager
+    let id = manager
         .add(&server.url("/plain"), directory.path().into(), 1)
         .unwrap();
-    let file = wait(&manager, finished, |d| {
+    let file = wait(&manager, id, |d| {
         matches!(d.status, Status::Complete | Status::Failed)
     });
     assert_eq!(file.status, Status::Complete, "{:?}", file.error);
-    manager.remove(finished);
-    assert_eq!(std::fs::read(file.path()).unwrap(), *server.bytes);
-    let active = manager
+    manager.delete(id);
+    wait_removed(&manager, id);
+    assert!(!file.path().exists());
+    let id = manager
         .add(&server.url("/ranged"), directory.path().into(), 4)
         .unwrap();
-    wait(&manager, active, |d| d.downloaded > 0);
-    manager.remove(active);
+    let active = wait(&manager, id, |d| d.downloaded > 0);
+    manager.delete(id);
+    manager.resume(id);
+    wait_removed(&manager, id);
+    assert!(!active.path().exists());
+    assert!(!active.parts_dir().exists());
+    let id = manager
+        .add(&server.url("/ranged"), directory.path().into(), 4)
+        .unwrap();
+    let active = wait(&manager, id, |d| d.downloaded > 0);
+    std::fs::write(
+        active.path(),
+        "created outside Strata while the transfer was pending",
+    )
+    .unwrap();
+    manager.delete(id);
+    wait_removed(&manager, id);
+    assert_eq!(
+        std::fs::read_to_string(active.path()).unwrap(),
+        "created outside Strata while the transfer was pending"
+    );
+    assert!(!active.parts_dir().exists());
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep me");
     manager.shutdown();
-    assert!(manager.snapshots().is_empty());
     assert!(Manager::new(history).unwrap().snapshots().is_empty());
-    assert_eq!(std::fs::read(file.path()).unwrap(), *server.bytes);
+}
+
+#[test]
+fn deleting_rejects_history_paths_outside_the_download_directory() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("output");
+    std::fs::create_dir(&output).unwrap();
+    let sentinel = directory.path().join("outside.txt");
+    std::fs::write(&sentinel, "must survive").unwrap();
+    let history = directory.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager.add(&server.url("/plain"), output, 1).unwrap();
+    wait(&manager, id, |d| d.status == Status::Complete);
+    manager.shutdown();
+    drop(manager);
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&history).unwrap()).unwrap();
+    stored["downloads"][0]["name"] = "../outside.txt".into();
+    stored["downloads"][0]["status"] = "Deleting".into();
+    std::fs::write(&history, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let manager = Manager::new(history).unwrap();
+    assert!(
+        manager.snapshots()[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Deletion was interrupted")
+    );
+    manager.delete(id);
+    let failed = wait(&manager, id, |d| d.status == Status::Failed);
+    assert!(
+        failed
+            .error
+            .unwrap()
+            .contains("recorded filename is invalid")
+    );
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "must survive");
+    manager.shutdown();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_locked_file_stays_in_history_until_device_deletion_can_be_retried() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Manager::new(directory.path().join("history.json")).unwrap();
+    let id = manager
+        .add(&server.url("/plain"), directory.path().into(), 1)
+        .unwrap();
+    let done = wait(&manager, id, |d| d.status == Status::Complete);
+    let locked = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(done.path())
+        .unwrap();
+    manager.delete(id);
+    let failed = wait(&manager, id, |d| d.status == Status::Failed);
+    assert!(failed.error.unwrap().contains("Could not delete download"));
+    assert!(done.path().exists());
+    drop(locked);
+    manager.delete(id);
+    wait_removed(&manager, id);
+    assert!(!done.path().exists());
+    manager.shutdown();
+}
+
+#[test]
+fn recovers_real_filenames_from_early_and_late_headers_redirects_and_types() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Manager::new(directory.path().join("history.json")).unwrap();
+    let guid = "0976f308-1892-4a34-aeca-7b155f43121e";
+    for (route, expected) in [
+        ("name-early", "Quarterly café report.pdf".to_string()),
+        ("name-late", "Quarterly; final report.pdf".to_string()),
+        ("name-redirect", "Readable-report.pdf".to_string()),
+        ("type-only", format!("{guid}.pdf")),
+    ] {
+        let id = manager
+            .add(
+                &server.url(&format!("/{route}/{guid}")),
+                directory.path().into(),
+                8,
+            )
+            .unwrap();
+        let done = wait(&manager, id, |d| {
+            matches!(d.status, Status::Complete | Status::Failed)
+        });
+        assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+        assert_eq!(done.name, expected);
+        assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    }
+    manager.settings.lock().unwrap().directory = directory.path().into();
+    let id = manager
+        .add_from_browser(
+            &server.url(&format!("/name-early/{guid}")),
+            Some("My chosen name.pdf"),
+            None,
+        )
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.name, "My chosen name.pdf");
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    let id = manager
+        .add_from_browser(
+            &server.url(&format!("/name-early/{guid}")),
+            Some(guid),
+            None,
+        )
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.name, "Quarterly café report (1).pdf");
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    assert_eq!(
+        std::fs::read(directory.path().join("Quarterly café report.pdf")).unwrap(),
+        *server.bytes
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn discovered_filenames_survive_resume_and_do_not_change_metalink_entry_paths() {
+    use sha2::Digest;
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.json");
+    let guid = "0976f308-1892-4a34-aeca-7b155f43121e";
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(
+            &server.url(&format!("/name-early/{guid}")),
+            directory.path().into(),
+            8,
+        )
+        .unwrap();
+    wait(&manager, id, |d| d.downloaded > 64 * 1024);
+    manager.pause(id);
+    let paused = wait(&manager, id, |d| {
+        matches!(d.status, Status::Paused | Status::Failed)
+    });
+    assert_eq!(paused.status, Status::Paused, "{:?}", paused.error);
+    assert_eq!(paused.name, "Quarterly café report.pdf");
+    manager.shutdown();
+    let restored = Manager::new(history).unwrap();
+    restored.resume(id);
+    let done = wait(&restored, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.name, paused.name);
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    let descriptor = directory.path().join("test.meta4");
+    let digest = format!("{:x}", sha2::Sha256::digest(&*server.bytes));
+    std::fs::write(&descriptor, format!("<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\"><file name=\"mirror-payload.pdf\"><hash type=\"sha-256\">{digest}</hash><url>{}</url></file></metalink>", server.url(&format!("/name-early/{guid}")))).unwrap();
+    let id = restored
+        .add(descriptor.to_str().unwrap(), directory.path().into(), 8)
+        .unwrap();
+    let done = wait(&restored, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(
+        std::fs::read(done.path().join("mirror-payload.pdf")).unwrap(),
+        *server.bytes
+    );
+    restored.delete(id);
+    wait_removed(&restored, id);
+    assert!(!done.path().exists());
+    assert!(!done.parts_dir().exists());
+    assert!(descriptor.exists());
+    restored.shutdown();
 }

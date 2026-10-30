@@ -93,6 +93,9 @@ pub struct Strata {
     menu_focus: FocusHandle,
     details_height: f32,
     resizing: Option<(Pixels, f32)>,
+    modal_close_focus: FocusHandle,
+    modal_choose_focus: FocusHandle,
+    modal_start_focus: FocusHandle,
     browser_registered: bool,
     browser_notice: Option<String>,
     directory: PathBuf,
@@ -177,12 +180,19 @@ impl Strata {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = manager.settings.lock().unwrap().clone();
-        let url = cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", cx));
-        let search = cx.new(|cx| TextInput::new("Search downloads", cx));
-        let proxy =
-            cx.new(|cx| TextInput::new("http://, https:// or socks5:// proxy (optional)", cx));
-        let identity = cx.new(|cx| TextInput::new("Automatic: ~/.ssh/id_ed25519 or id_rsa", cx));
-        let known_hosts = cx.new(|cx| TextInput::new("Default: ~/.ssh/known_hosts", cx));
+        let url =
+            cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", window, cx));
+        let search = cx.new(|cx| TextInput::new("Search downloads", window, cx));
+        let proxy = cx.new(|cx| {
+            TextInput::new(
+                "http://, https:// or socks5:// proxy (optional)",
+                window,
+                cx,
+            )
+        });
+        let identity =
+            cx.new(|cx| TextInput::new("Automatic: ~/.ssh/id_ed25519 or id_rsa", window, cx));
+        let known_hosts = cx.new(|cx| TextInput::new("Default: ~/.ssh/known_hosts", window, cx));
         proxy.update(cx, |input, cx| {
             input.set_value(
                 settings
@@ -276,6 +286,9 @@ impl Strata {
             menu_focus: cx.focus_handle(),
             details_height: settings.details_height,
             resizing: None,
+            modal_close_focus: cx.focus_handle(),
+            modal_choose_focus: cx.focus_handle(),
+            modal_start_focus: cx.focus_handle(),
             browser_registered: strata::bridge::browsers_registered(),
             browser_notice: None,
             directory: settings.directory,
@@ -348,6 +361,7 @@ impl Strata {
     }
 
     fn show_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_resize();
         self.menu = None;
         self.view = View::All;
         self.adding = true;
@@ -568,11 +582,13 @@ impl Strata {
                 items.push(("Copy download link", Icon::Copy, MenuAction::Copy(id)));
                 if !matches!(
                     d.status,
-                    Status::Complete | Status::Cancelled | Status::Assembling
+                    Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
                 ) {
                     items.push(("Cancel transfer", Icon::Close, MenuAction::Cancel(id)));
                 }
-                items.push(("Delete", Icon::Trash, MenuAction::Delete(id)));
+                if d.status != Status::Deleting {
+                    items.push(("Delete from device", Icon::Trash, MenuAction::Delete(id)));
+                }
                 items
             }
         }
@@ -585,7 +601,7 @@ impl Strata {
             MenuAction::Resume(id) => self.manager.resume(id),
             MenuAction::Cancel(id) => self.manager.cancel(id),
             MenuAction::Delete(id) => {
-                self.manager.remove(id);
+                self.manager.delete(id);
                 self.rates.remove(&id);
                 self.previous.remove(&id);
             }
@@ -710,7 +726,7 @@ impl Strata {
         }
     }
 
-    fn queue(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn queue(&mut self, cx: &mut Context<Self>) -> Div {
         let title = match self.view {
             View::Active => "In progress",
             View::Finished => "Completed",
@@ -718,9 +734,6 @@ impl Strata {
             _ => "All downloads",
         };
         let files = self.filtered(cx);
-        let speed: f64 = self.rates.values().sum();
-        let active = self.downloads.iter().filter(|d| d.status.active()).count();
-        let received: u64 = self.downloads.iter().map(|d| d.downloaded).sum();
         div()
             .flex_1()
             .min_w_0()
@@ -753,26 +766,6 @@ impl Strata {
                         )),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(64.))
-                    .flex_shrink_0()
-                    .bg(rgb(SURFACE))
-                    .px(px(16.))
-                    .gap(px(26.))
-                    .child(metric(
-                        "Transfer speed",
-                        &format!("{}/s", bytes(speed as u64)),
-                        BLUE,
-                    ))
-                    .child(div().w(px(1.)).h(px(42.)).bg(rgb(RULE)))
-                    .child(metric("Active transfers", &active.to_string(), TEXT))
-                    .child(div().w(px(1.)).h(px(42.)).bg(rgb(RULE)))
-                    .child(metric("Total received", &bytes(received), TEXT)),
-            )
-            .when(self.adding, |d| d.child(self.add_form(window, cx)))
             .child(
                 div()
                     .flex()
@@ -823,6 +816,12 @@ impl Strata {
                                         .flex_shrink_0(),
                                 )
                             })
+                            .child(
+                                label("ETA", 12., FAINT)
+                                    .w(px(84.))
+                                    .text_right()
+                                    .flex_shrink_0(),
+                            )
                             .child(div().w(px(30.)).flex_shrink_0()),
                     )
                     .child(
@@ -978,6 +977,21 @@ impl Strata {
                 )
             })
             .child(
+                label(
+                    if d.status == Status::Downloading {
+                        remaining_time(d.total, d.downloaded, rate)
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| "—".into()),
+                    12.,
+                    MUTED,
+                )
+                .w(px(84.))
+                .text_right()
+                .flex_shrink_0(),
+            )
+            .child(
                 icon_button(format!("menu-{id}"), Icon::More).on_click(cx.listener(
                     move |this, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
@@ -992,7 +1006,38 @@ impl Strata {
             }))
     }
 
-    fn add_form(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn add_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        deferred(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(rgba(0x000000a6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("new-download-modal")
+                        .w(px(660.))
+                        .max_w(relative(0.9))
+                        .max_h(relative(0.85))
+                        .overflow_y_scroll()
+                        .border_1()
+                        .border_color(rgb(0x44484c))
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.adding = false;
+                            this.error = None;
+                            this.focus.focus(window);
+                            cx.notify();
+                        }))
+                        .child(self.add_form(cx)),
+                ),
+        )
+        .with_priority(2)
+    }
+
+    fn add_form(&self, cx: &mut Context<Self>) -> Div {
         div()
             .p(px(18.))
             .bg(rgb(SURFACE))
@@ -1005,14 +1050,16 @@ impl Strata {
                     .justify_between()
                     .items_center()
                     .child(label("New download", 15., TEXT).font_weight(FontWeight::MEDIUM))
-                    .child(icon_button("close-add", Icon::Close).on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.adding = false;
-                            this.error = None;
-                            window.focus(&this.focus);
-                            cx.notify();
-                        },
-                    ))),
+                    .child(
+                        icon_button("close-add", Icon::Close)
+                            .track_focus(&self.modal_close_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.adding = false;
+                                this.error = None;
+                                window.focus(&this.focus);
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(label("Download link", 12., MUTED))
             .child(
@@ -1036,6 +1083,7 @@ impl Strata {
                     Icon::Folder,
                     false,
                 )
+                .track_focus(&self.modal_choose_focus)
                 .on_click(cx.listener(|this, _, window, cx| this.choose_source(window, cx))),
             )
             .child(
@@ -1054,6 +1102,7 @@ impl Strata {
                     )
                     .child(
                         button("start-download", "Start download", Icon::Download, true)
+                            .track_focus(&self.modal_start_focus)
                             .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
                     ),
             )
@@ -1126,79 +1175,81 @@ impl Strata {
                         .flex_1()
                         .flex()
                         .items_center()
+                        .justify_center()
+                        .text_center()
                         .px(px(28.))
                         .child(label("Click on a download to view more info.", 13., MUTED)),
                 );
         };
         let id = d.id;
         let rate = self.rates.get(&id).copied().unwrap_or(0.);
-        let eta = if rate > 0. {
-            d.total
-                .map(|n| duration(n.saturating_sub(d.downloaded) as f64 / rate))
+        let eta = if d.status == Status::Downloading {
+            remaining_time(d.total, d.downloaded, rate)
         } else {
             None
         };
-        let actions =
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(8.))
-                .when(d.status == Status::Complete, |actions| {
-                    actions.child(
-                        button(
-                            "open-file",
-                            if d.protocol.folder_output() {
-                                "Open download folder"
-                            } else {
-                                "Open file"
-                            },
-                            Icon::Arrow,
-                            true,
-                        )
-                        .on_click(cx.listener(move |this, _, _, _| {
-                            if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
-                                reveal(&d.path());
-                            }
-                        })),
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .when(d.status == Status::Complete, |actions| {
+                actions.child(
+                    button(
+                        "open-file",
+                        if d.protocol.folder_output() {
+                            "Open download folder"
+                        } else {
+                            "Open file"
+                        },
+                        Icon::Arrow,
+                        true,
                     )
-                })
-                .when(
-                    matches!(d.status, Status::Failed | Status::Paused),
-                    |actions| {
-                        actions.child(
-                            button("resume-selected", "Resume download", Icon::Play, true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.manager.resume(id);
-                                    cx.notify();
-                                })),
-                        )
-                    },
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
+                            reveal(&d.path());
+                        }
+                    })),
                 )
-                .when(d.status.active() || d.status == Status::Queued, |actions| {
+            })
+            .when(
+                matches!(d.status, Status::Failed | Status::Paused),
+                |actions| {
                     actions.child(
-                        button("pause-selected", "Pause download", Icon::Pause, true).on_click(
+                        button("resume-selected", "Resume download", Icon::Play, true).on_click(
                             cx.listener(move |this, _, _, cx| {
-                                this.manager.pause(id);
+                                this.manager.resume(id);
                                 cx.notify();
                             }),
                         ),
                     )
-                })
-                .when(
-                    !matches!(
-                        d.status,
-                        Status::Complete | Status::Cancelled | Status::Assembling
+                },
+            )
+            .when(d.status.active() || d.status == Status::Queued, |actions| {
+                actions.child(
+                    button("pause-selected", "Pause download", Icon::Pause, true).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.manager.pause(id);
+                            cx.notify();
+                        }),
                     ),
-                    |actions| {
-                        actions.child(
-                            button("cancel-selected", "Cancel transfer", Icon::Close, false)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.manager.cancel(id);
-                                    cx.notify();
-                                })),
-                        )
-                    },
-                );
+                )
+            })
+            .when(
+                !matches!(
+                    d.status,
+                    Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
+                ),
+                |actions| {
+                    actions.child(
+                        button("cancel-selected", "Cancel transfer", Icon::Close, false).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.manager.cancel(id);
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                },
+            );
         panel
             .h(px(self.details_height))
             .child(self.details_resizer(cx))
@@ -1441,7 +1492,11 @@ impl Render for Strata {
                     cx.stop_propagation();
                 } else if event.keystroke.modifiers.control && key == "f" {
                     this.menu = None;
-                    this.search.focus_handle(cx).focus(window);
+                    if this.adding {
+                        this.url.focus_handle(cx).focus(window);
+                    } else {
+                        this.search.focus_handle(cx).focus(window);
+                    }
                 } else if key == "escape" {
                     if this.menu.take().is_some() {
                         this.focus.focus(window);
@@ -1458,6 +1513,26 @@ impl Render for Strata {
                 {
                     this.add(window, cx);
                 } else if key == "tab" {
+                    if this.adding {
+                        let handles = [
+                            this.url.focus_handle(cx),
+                            this.modal_choose_focus.clone(),
+                            this.modal_start_focus.clone(),
+                            this.modal_close_focus.clone(),
+                        ];
+                        let index = handles
+                            .iter()
+                            .position(|handle| handle.is_focused(window))
+                            .unwrap_or(0);
+                        let next = if event.keystroke.modifiers.shift {
+                            (index + handles.len() - 1) % handles.len()
+                        } else {
+                            (index + 1) % handles.len()
+                        };
+                        handles[next].focus(window);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if event.keystroke.modifiers.shift {
                         window.focus_prev();
                     } else {
@@ -1479,7 +1554,7 @@ impl Render for Strata {
                         })
                         .when(self.view != View::Settings, |d| {
                             d.child(self.topbar(cx))
-                                .child(self.queue(window, cx))
+                                .child(self.queue(cx))
                                 .child(self.inspector(cx))
                         })
                         .children(
@@ -1501,6 +1576,7 @@ impl Render for Strata {
                 self.menu
                     .map(|(menu, position)| self.popup_menu(menu, position, cx)),
             )
+            .children(self.adding.then(|| self.add_modal(cx)))
     }
 }
 
@@ -1510,21 +1586,6 @@ fn label(text: impl AsRef<str>, size: f32, color: u32) -> Div {
         .line_height(px((size * 1.4).round()))
         .text_color(rgb(color))
         .child(crate::text::CrispText(text.as_ref().to_owned().into()))
-}
-
-fn metric(title: &str, value: &str, color: u32) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(label(title, 12., FAINT))
-        .child(
-            label(value, 24., color)
-                .font_weight(FontWeight::MEDIUM)
-                .whitespace_nowrap(),
-        )
 }
 
 fn table_row() -> Div {
@@ -1752,6 +1813,13 @@ fn duration(seconds: f64) -> String {
     }
 }
 
+fn remaining_time(total: Option<u64>, downloaded: u64, rate: f64) -> Option<String> {
+    if !rate.is_finite() || rate <= 0. {
+        return None;
+    }
+    total.map(|total| duration(total.saturating_sub(downloaded) as f64 / rate))
+}
+
 fn short_path(path: &std::path::Path) -> String {
     let raw = path.display().to_string();
     std::env::var("USERPROFILE")
@@ -1902,7 +1970,7 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_details_height, segment_layout};
+    use super::{clamp_details_height, remaining_time, segment_layout};
     use strata::engine::Part;
 
     #[test]
@@ -1943,5 +2011,13 @@ mod tests {
         assert_eq!(clamp_details_height(900., 1000.), 540.);
         assert_eq!(clamp_details_height(-100., 700.), 120.);
         assert_eq!(clamp_details_height(f32::NAN, 880.), 240.);
+    }
+
+    #[test]
+    fn eta_requires_a_known_size_and_a_live_finite_rate() {
+        assert_eq!(remaining_time(Some(1000), 400, 200.), Some("3s".into()));
+        assert_eq!(remaining_time(None, 400, 200.), None);
+        assert_eq!(remaining_time(Some(1000), 400, 0.), None);
+        assert_eq!(remaining_time(Some(1000), 400, f64::NAN), None);
     }
 }

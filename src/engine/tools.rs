@@ -270,6 +270,7 @@ pub(super) async fn finish_file(job: &Arc<Job>, path: &Path) -> Result<()> {
         data.total = Some(size);
         data.downloaded = size;
         data.status = Status::Complete;
+        data.owns_output = true;
         data.error = None;
     }
     Ok(())
@@ -306,6 +307,7 @@ pub(super) fn publish_directory(job: &Arc<Job>, source: &Path) -> Result<()> {
     let mut data = job.data.lock().unwrap();
     data.total = Some(data.downloaded);
     data.status = Status::Complete;
+    data.owns_output = true;
     data.error = None;
     Ok(())
 }

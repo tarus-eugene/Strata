@@ -23,10 +23,10 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 
 ## Using Strata
 
-- Add a URL or magnet with **New download** or **Ctrl+N**. A valid source on the clipboard is filled in automatically. **Open torrent / Metalink file** selects a local descriptor. Press **Enter** to start.
-- Search with **Ctrl+F**. The full-width download table shows file name, size, status, progress, and speed. Use **Filter** at the top for All downloads, In progress, Completed, or Stopped; **Settings** is at the top right.
+- Add a URL or magnet with **New download** or **Ctrl+N**. The centered modal fills a valid clipboard source. **Open torrent / Metalink file** selects a descriptor. Enter starts; Escape or clicking outside closes it. Tab stays within the modal controls. Native text inputs use a blinking caret at the Windows caret rate.
+- Search with **Ctrl+F**. The full-width table shows file name, size, status, progress, speed, and ETA. Unknown-size and stopped transfers show no ETA. Summary cards are omitted to reclaim table space. **Filter** is at the top left; **Settings** is at the top right.
 - Click a row to inspect its destination, source, and one segmented connection-progress bar in the bottom panel. Drag the panel's top divider to resize it; focus the divider and press **Up/Down** for keyboard resizing. Its height is remembered.
-- Each row's **three-dot menu** contains its available pause/resume, open, open-folder, copy-link, cancel, and delete actions. **Delete** stops the transfer and removes its history entry while keeping downloaded files and partial data.
+- Each row has a **three-dot menu**. **Delete from device** waits for writes to stop, permanently deletes its owned file/output folder and partial data, then removes the entry. Locked-file and permission failures keep the entry with an error so deletion can be retried. **Cancel** retains partial data.
 - Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides Strata to the system tray and keeps downloads running.** Click the tray icon or choose **Open Strata** from its right-click menu to restore it. Launching the app again also restores its existing window.
 - To fully exit, right-click the tray icon and choose **Quit Strata**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
 - Choose the download folder and 1, 4, 8, or 16 connections in Settings. Up to three downloads run simultaneously.
@@ -37,7 +37,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\Strata-Setup-0.1.3-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\Strata-Setup-0.1.4-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
 
@@ -116,7 +116,7 @@ With capture enabled, the extension pauses eligible HTTP/HTTPS file downloads, s
 
 Capture is enabled by default: start a normal browser download and it is sent to Strata automatically, with no **Download with Strata** action required. Accepted browser downloads open or restore the app, including when it is hidden in the tray. Downloads awaiting browser scanning are retried when the browser reports them safe. The context-menu command and popup URL field remain optional shortcuts. Checking connection status alone does not open the app.
 
-The extension uses Manifest V3 with only `downloads`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in Strata.
+The extension uses Manifest V3 with `downloads`, `downloads.ui`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in Strata.
 
 The bridge uses Chrome's [native messaging protocol](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and a local named pipe restricted to your Windows user and SYSTEM. The committed extension public key keeps its ID stable: `eaccbjfepcpidchboonodedpepgboolc`. Only that extension origin is allowed; messages are length-bounded and accept fixed actions, never commands.
 
@@ -151,7 +151,7 @@ History and settings: `%LOCALAPPDATA%\Strata\history.json`. Partial files: `.str
 
 For portable storage or isolated testing, set `STRATA_DATA_DIR` to a directory before launching. It changes the history/settings location, not the destination of existing downloads.
 
-Authenticated browser-cookie import, scheduling, speed limits, and dynamic redistribution of a slow HTTP connection's remaining range are outside this version's scope. Direct-file names come from the browser when provided, or from the URL path; Content-Disposition names are not yet read directly by the app. Cancellation stops the transfer and retains its partial files; remove the matching hidden parts folder manually if you no longer need it.
+Authenticated browser-cookie import, scheduling, speed limits, and dynamic redistribution of a slow HTTP range are outside this version. Filename recovery uses browser filename determination, Content-Disposition (including UTF-8 filename*), readable redirect URLs, and MIME extensions for temporary names. Later transfer headers are checked again before publishing the file. Meaningful browser-provided names and Metalink entry paths are retained, and existing files are never replaced. If neither browser nor server supplies an original name, that name cannot be reconstructed from arbitrary file bytes.
 
 ## Checks
 
@@ -168,3 +168,7 @@ End-to-end verification used isolated Chromium and Brave profiles: a real browse
 `scripts/test-installer.ps1` exercises the real setup EXE in a directory with spaces: running-app protection, install, repeat-install upgrade, runtime and extension payloads, Start menu shortcut, native host registrations, and uninstall. It starts the installed CLI and each media helper with a restricted PATH, checks that unrelated data remains, and verifies that a bridge registration belonging to a different installation survives. Use a Windows account without an existing installed Strata or Strata Start menu shortcut; quit any running copy first. The test snapshots and restores existing native host registrations and leaves diagnostic logs under `.tools/installer-test`.
 
 The editable text input is adapted from GPUI's Apache-2.0 example; see `NOTICE` and `LICENSE-APACHE`.
+
+Browser download-popup suppression follows the capture switch using the Chromium `downloads.ui` API. Reload the updated companion and approve its download-interface permission if requested. Disabling capture, handing a transfer back to the browser, or encountering a browser-only download restores the UI. The API controls all windows in the current browser profile; a simultaneous browser-only transfer can re-enable that UI. Forks without the API still hand off downloads.
+
+Filename and deletion regressions cover encoded and quoted server names, late headers, redirects, extension fallback, collisions, resume, Metalink paths, permanent cleanup, locked-file retry, interrupted deletion, and rejecting paths outside the recorded output directory. Caret and ETA tests cover blink timing and unknown-size/stalled transfers.
