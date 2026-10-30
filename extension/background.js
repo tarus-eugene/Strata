@@ -22,6 +22,21 @@ function nativeRequest(item) {
     filename: (item.filename || '').split(/[\\/]/).pop() || null, referrer };
 }
 
+export function usefulFilename(filename) {
+  const name = (filename || '').split(/[\\/]/).pop();
+  return !!name && !/^(?:\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?|[0-9a-f]{32,64})(?:\.[^.]+)?$/i.test(name);
+}
+
+export async function setDownloadUi(api, enabled) {
+  try { await api.downloads.setUiOptions({ enabled }); return true; }
+  catch { return false; } // Some Chromium forks do not implement downloads.ui.
+}
+
+export async function syncDownloadUi(api) {
+  const { captureEnabled = true } = await api.storage.local.get('captureEnabled');
+  return setDownloadUi(api, !captureEnabled);
+}
+
 async function record(api, message, error = false) {
   await api.storage.local.set({ lastResult: { message, error, time: Date.now() } });
   await api.action.setBadgeText({ text: error ? '!' : '' });
@@ -29,7 +44,11 @@ async function record(api, message, error = false) {
 }
 
 export async function captureDownload(item, api) {
-  if (!eligible(item) || item.byExtensionId === api.runtime.id || active.has(item.id)) return false;
+  if (!eligible(item)) {
+    if (item.state === 'in_progress') await setDownloadUi(api, true);
+    return false;
+  }
+  if (item.byExtensionId === api.runtime.id || active.has(item.id)) return false;
   const key = `${pendingPrefix}${item.id}`;
   active.add(item.id);
   let paused = false;
@@ -37,6 +56,7 @@ export async function captureDownload(item, api) {
   try {
     const { captureEnabled = true } = await api.storage.local.get('captureEnabled');
     if (!captureEnabled) return false;
+    await setDownloadUi(api, false);
     // Persist recovery state before pausing; a suspended worker must not strand Chrome's transfer.
     await api.storage.local.set({ [key]: { id: item.id, startTime: item.startTime, phase: 'pending' } });
     await api.downloads.pause(item.id);
@@ -44,9 +64,11 @@ export async function captureDownload(item, api) {
     const [current] = await api.downloads.search({ id: item.id });
     if (!current || !current.paused || !eligible({ ...item, ...current, paused: false })) {
       if (current?.state === 'in_progress' && current.paused) await api.downloads.resume(item.id);
+      await setDownloadUi(api, true);
       return false;
     }
-    const reply = await api.runtime.sendNativeMessage(HOST, nativeRequest({ ...item, ...current }));
+    const download = { ...item, ...current, filename: usefulFilename(current.filename) ? current.filename : (item.filename || current.filename) };
+    const reply = await api.runtime.sendNativeMessage(HOST, nativeRequest(download));
     if (reply?.ok !== true || !Number.isSafeInteger(reply.id) || reply.id <= 0) {
       throw new Error(reply?.error || 'Strata did not accept the download.');
     }
@@ -60,6 +82,7 @@ export async function captureDownload(item, api) {
     }
     return true;
   } catch (error) {
+    await setDownloadUi(api, true);
     let message = 'Kept in your browser. ' + error.message;
     if (paused && !accepted) {
       try { await api.downloads.resume(item.id); }
@@ -68,8 +91,7 @@ export async function captureDownload(item, api) {
     await record(api, message, true);
     return false;
   } finally {
-    await api.storage.local.remove(key);
-    active.delete(item.id);
+    try { await api.storage.local.remove(key); } finally { active.delete(item.id); }
   }
 }
 
@@ -87,22 +109,35 @@ export async function recoverPending(api) {
       const [item] = await api.downloads.search({ id: pending.id });
       if (typeof pending.startTime === 'string' && item?.startTime === pending.startTime && item.state === 'in_progress' && item.paused) {
         if (pending.phase === 'accepted') await api.downloads.cancel(pending.id);
-        else await api.downloads.resume(pending.id);
+        else { await api.downloads.resume(pending.id); await setDownloadUi(api, true); }
       }
       await api.storage.local.remove(key);
-    } catch { /* Retain recovery state so the next worker activation can try again. */ }
+    } catch {
+      await setDownloadUi(api, true);
+      // Retain recovery state so the next worker activation can try again.
+    }
   }
 }
 
 if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
-  const ready = recoverPending(chrome);
+  const ready = syncDownloadUi(chrome).then(() => recoverPending(chrome));
+  chrome.runtime.onStartup.addListener(() => { syncDownloadUi(chrome).catch(error => record(chrome, error.message, true)); });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.captureEnabled) syncDownloadUi(chrome).catch(error => record(chrome, error.message, true));
+  });
   chrome.runtime.onInstalled.addListener(async () => {
+    await syncDownloadUi(chrome);
     await chrome.contextMenus.removeAll();
     chrome.contextMenus.create({ id: 'send-to-strata', title: 'Download with Strata',
       contexts: ['link'] });
   });
   chrome.downloads.onCreated.addListener(item => {
-    ready.then(() => captureDownload(item, chrome)).catch(error => record(chrome, error.message, true));
+    // Suppress UI immediately, but wait for Chrome's filename before handing off.
+    ready.then(() => eligible(item) ? syncDownloadUi(chrome) : setDownloadUi(chrome, true)).catch(error => record(chrome, error.message, true));
+  });
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    ready.then(() => captureDownload(item, chrome)).catch(error => record(chrome, error.message, true)).finally(() => suggest());
+    return true;
   });
   chrome.downloads.onChanged.addListener(delta => {
     ready.then(() => captureChanged(delta, chrome)).catch(error => record(chrome, error.message, true));

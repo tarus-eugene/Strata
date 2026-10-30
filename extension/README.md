@@ -16,3 +16,5 @@ The desktop app and `strata-bridge.exe` must remain beside each other. If you mo
 The same Manifest V3 extension uses standard Chromium APIs across compatible Windows browsers. Chrome, Chromium, and Edge host registration locations are configured. Browser policies or fork-specific restrictions can disable native messaging or unpacked extensions. Every Chromium fork has not been tested individually; the native app is Windows-only.
 
 To disconnect, turn capture off and remove the extension in Chrome. `install-browser.ps1 -Uninstall` unregisters the app connection without deleting downloads or history.
+
+While capture is enabled, the companion suppresses Chromium download UI using the downloads.ui permission. Reload the updated extension and approve that permission if your browser asks. Capture off or browser fallback restores the UI. This control is profile-wide and may be unavailable in some Chromium forks. Filename determination is awaited before handoff so temporary GUID names can be replaced by the browser name; Strata also reads server filename metadata.
