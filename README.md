@@ -24,7 +24,7 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 ## Using Strata
 
 - Add a URL or magnet with **New download** or **Ctrl+N**. A valid source on the clipboard is filled in automatically. **Open torrent / Metalink file** selects a local descriptor. Press **Enter** to start.
-- Search with **Ctrl+F**. Select a row to inspect its individual connection lanes, progress, destination, and source.
+- Search with **Ctrl+F**. The download table shows file name, size, status, progress, and speed. Click a row to inspect its individual connection lanes, destination, and source in the bottom details panel.
 - Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides Strata to the system tray and keeps downloads running.** Click the tray icon or choose **Open Strata** from its right-click menu to restore it. Launching the app again also restores its existing window.
 - To fully exit, right-click the tray icon and choose **Quit Strata**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
 - Choose the download folder and 1, 4, 8, or 16 connections in Settings. Up to three downloads run simultaneously.
@@ -35,7 +35,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\Strata-Setup-0.1.0-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\Strata-Setup-0.1.1-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
 
