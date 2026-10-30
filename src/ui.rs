@@ -127,10 +127,7 @@ impl Strata {
                     .items_center()
                     .gap(px(10.))
                     .child(
-                        svg()
-                            .path("brand/mark.svg")
-                            .size(px(25.))
-                            .text_color(rgb(ACCENT)),
+                        img("brand/mark.png").size(px(25.)),
                     )
                     .child(label("101 Downloader", 17., TEXT).font_weight(FontWeight::SEMIBOLD)),
             )

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "101 Downloader — Download companion",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Capture Chromium browser file downloads and send them to your local 101 Downloader download manager.",
   "minimum_chrome_version": "105",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyIie4cC/ngoIW7QNd6NfcBLwKv2jACvwhGQMCVyGxvckAuAG8pHNLoGnnVx7BZEu/kW9d+yhVev8v5ZC2lPXu5A2q1d4CN+7ZN094ErM5ie5JOSzbfbVRGCFro4gclgM0fr+7i3eBgop0/dRwMsBkhbwaOlssV7mq3QrcGTG66fWSw4HxDi6dNFz7hNO5UnR49yrlpKlU8M7OGXpbj/r5nQZd27W5ausAFOUpitZJVG/wOumXiFsJSUpYbud0r0sv8ULUEjKUxZ9U+sDFzuq/wL3gwnACDJJIjZD8iD0J7mTDmizGd1xC3X3MKfTfTUwW9xqyzQZ3/fx6IRU4pkV7QIDAQAB",

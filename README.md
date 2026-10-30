@@ -37,7 +37,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\101-Downloader-Setup-0.2.0-x64.exe` to install 101 Downloader for your Windows account. Administrator access is not required. It includes the optimized app, `101Downloader-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\101-Downloader-Setup-0.2.1-x64.exe` to install 101 Downloader for your Windows account. Administrator access is not required. It includes the optimized app, `101Downloader-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit 101 Downloader through its tray menu before upgrading or uninstalling.
 
@@ -124,7 +124,7 @@ The bridge is registered in the per-user Chrome, Chromium, and Edge native messa
 
 ## Logo
 
-The orange 101 mark ends in a download arrow. The palette uses branding orange #E85002, black #000000, white #F9F9F9, and neutral grays #A7A7A7, #646464, and #333333 from the supplied reference. Editable artwork: `assets/brand/mark.svg` and `assets/brand/wordmark.svg`. The app embeds the SVG and Windows ICO; the extension ships matching PNGs. Regenerate the platform icons with `.\scripts\generate-icons.ps1`.
+The logo uses the user-supplied orange hanging orangutan illustration, with its original black background and colors. The palette uses branding orange #E85002, black #000000, white #F9F9F9, and neutral grays #A7A7A7, #646464, and #333333 from the supplied reference. The unchanged source image is `assets/brand/mark.png`. The app embeds that PNG and a Windows ICO; the extension ships matching resized PNGs. Regenerate the platform icons with `.\scripts\generate-icons.ps1`.
 
 ## How parallel downloading works
 
