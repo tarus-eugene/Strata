@@ -6,7 +6,7 @@ $cache = Join-Path $root '.tools/media-downloads'
 New-Item -ItemType Directory -Force -Path $cache, $Destination | Out-Null
 $tools = Get-Content (Join-Path $root 'resources/media-tools.json') -Raw | ConvertFrom-Json
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$provenance = @('# Strata media helpers', '', 'Bundled helpers run as separate processes. They retain their upstream licenses.', '')
+$provenance = @('# 101 Downloader media helpers', '', 'Bundled helpers run as separate processes. They retain their upstream licenses.', '')
 function Download-Asset([string]$Url, [string]$Path, [long]$Length) {
     $Url += '?strata=range-download'
     if ($length -le 0 -or $length -gt 512MB) { throw 'Unexpected media archive size.' }

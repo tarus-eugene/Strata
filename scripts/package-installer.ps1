@@ -57,11 +57,11 @@ Get-ChildItem -LiteralPath $RuntimeDirectory -Filter '*.dll' -File | Copy-Item -
 & (Join-Path $PSScriptRoot 'fetch-media-tools.ps1') -Destination (Join-Path $stage 'tools') | Out-Host
 & (Join-Path $PSScriptRoot 'package-extension.ps1') | Out-Host
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $root 'dist/strata-browser-extension.zip'), (Join-Path $stage 'extension'))
+[IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $root 'dist/101-downloader-browser-extension.zip'), (Join-Path $stage 'extension'))
 $output = Join-Path $root 'dist'
 & $CompilerPath "/DAppVersion=$version" "/DPayloadDir=$stage" "/DOutputPath=$output" (Join-Path $root 'installer/strata.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-$installer = Join-Path $output "Strata-Setup-$version-x64.exe"
+$installer = Join-Path $output "101-Downloader-Setup-$version-x64.exe"
 $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$installer.sha256", "$hash  $([IO.Path]::GetFileName($installer))`n", [Text.Encoding]::ASCII)
 Write-Output "Installer: $installer"

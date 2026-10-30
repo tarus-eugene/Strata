@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         show_startup_error(
-            "Strata is already running. Open the existing Strata window to manage your downloads."
+            "101 Downloader is already running. Open the existing 101 Downloader window to manage your downloads."
                 .into(),
         );
         return Ok(());
@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
         Ok(manager) => manager,
         Err(error) => {
             show_startup_error(format!(
-                "Strata could not open its download history.\n\n{error:#}"
+                "101 Downloader could not open its download history.\n\n{error:#}"
             ));
             return Ok(());
         }
@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(1020.), px(700.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Strata — Download manager".into()),
+                        title: Some("101 Downloader — Download manager".into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
                     window.set_rem_size(px(16.));
                     let (tray, tray_error) = match tray::Tray::new(window) {
                         Ok(tray) => (Some(Rc::new(tray)), None),
-                        Err(error) => (None, Some(format!("System tray unavailable. Closing the window will quit Strata. {error:#}"))),
+                        Err(error) => (None, Some(format!("System tray unavailable. Closing the window will quit 101 Downloader. {error:#}"))),
                     };
                     if let Some(tray) = tray.clone() {
                         cx.on_app_quit(move |_| {
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
                     app
                 },
             )
-            .expect("Could not open the Strata window");
+            .expect("Could not open the 101 Downloader window");
             cx.activate(true);
         });
     Ok(())
@@ -140,7 +140,7 @@ fn show_startup_error(message: String) {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .bg(rgb(0x0c0d0f))
+                .bg(rgb(0x000000))
                 .p_8()
                 .text_color(rgb(0xf0f1f2))
                 .font_family("Segoe UI")
@@ -155,7 +155,7 @@ fn show_startup_error(message: String) {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Strata".into()),
+                    title: Some("101 Downloader".into()),
                     ..Default::default()
                 }),
                 ..Default::default()

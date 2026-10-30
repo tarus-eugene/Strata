@@ -9,7 +9,7 @@ $paths = @($files | ForEach-Object {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing extension file: $_" }
     $path
 })
-$archive = Join-Path $output 'strata-browser-extension.zip'
+$archive = Join-Path $output '101-downloader-browser-extension.zip'
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $stream = [IO.File]::Open($archive, [IO.FileMode]::Create)
 $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)

@@ -1,9 +1,9 @@
-Strata is ready.
+101 Downloader is ready.
 
-Closing the window keeps downloads running in the system tray. To exit, right-click the tray icon and choose Quit Strata.
+Closing the window keeps downloads running in the system tray. To exit, right-click the tray icon and choose Quit 101 Downloader.
 
-To capture browser downloads, load the extension folder inside your Strata installation from your browser's extensions page. Enable Developer mode, choose Load unpacked, and select that folder. The Start menu includes Browser companion setup with instructions for Chrome, Edge, Brave, Vivaldi, Opera, and Chromium.
+To capture browser downloads, load the extension folder inside your 101 Downloader installation from your browser's extensions page. Enable Developer mode, choose Load unpacked, and select that folder. The Start menu includes Browser companion setup with instructions for Chrome, Edge, Brave, Vivaldi, Opera, and Chromium.
 
 The installer connects the local bridge when the browser companion task is selected. Browser extensions still need to be enabled in each browser profile.
 
-Uninstalling Strata retains your download history, settings, downloaded files, and partial transfers.
+Uninstalling 101 Downloader retains your download history, settings, downloaded files, and partial transfers.

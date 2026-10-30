@@ -7,8 +7,8 @@ async function check() {
   $('refresh').disabled = true;
   try {
     const reply = await chrome.runtime.sendNativeMessage(HOST, { action: 'ping' });
-    if (!reply?.ok) throw new Error(reply?.error || 'Open Strata to connect.');
-    $('status').textContent = `Connected to Strata ${reply.version}`;
+    if (!reply?.ok) throw new Error(reply?.error || 'Open 101 Downloader to connect.');
+    $('status').textContent = `Connected to 101 Downloader ${reply.version}`;
     $('status-dot').classList.add('connected'); $('setup').hidden = true;
   } catch {
     $('status').textContent = 'App not connected'; $('status-dot').classList.remove('connected'); $('setup').hidden = false;
@@ -20,22 +20,22 @@ $('capture').checked = stored.captureEnabled !== false;
 if (stored.lastResult) result(stored.lastResult.message, stored.lastResult.error);
 $('capture').addEventListener('change', async () => {
   await chrome.storage.local.set({ captureEnabled: $('capture').checked });
-  result($('capture').checked ? 'New file downloads will be sent to Strata.' : 'New downloads will stay in your browser.');
+  result($('capture').checked ? 'New file downloads will be sent to 101 Downloader.' : 'New downloads will stay in your browser.');
 });
 $('refresh').addEventListener('click', check);
 $('send-form').addEventListener('submit', async event => {
   event.preventDefault(); $('send').disabled = true;
   try {
     const reply = await chrome.runtime.sendNativeMessage(HOST, { action: 'download', url: $('url').value.trim() });
-    if (!reply?.ok) throw new Error(reply?.error || 'Strata did not accept this link.');
-    result('Download added to Strata.'); $('url').value = ''; await check();
+    if (!reply?.ok) throw new Error(reply?.error || '101 Downloader did not accept this link.');
+    result('Download added to 101 Downloader.'); $('url').value = ''; await check();
   } catch (error) { result(error.message, true); }
   finally { $('send').disabled = false; }
 });
 $('open-app').addEventListener('click', async () => {
   try {
     const reply = await chrome.runtime.sendNativeMessage(HOST, { action: 'open' });
-    if (!reply?.ok) throw new Error(reply?.error || 'Could not open Strata.');
+    if (!reply?.ok) throw new Error(reply?.error || 'Could not open 101 Downloader.');
     await check();
   } catch (error) { result(error.message, true); }
 });

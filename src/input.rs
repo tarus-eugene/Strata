@@ -592,7 +592,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0xeeeeee),
+                    rgb(0xf9f9f9),
                 )),
             )
         } else {
@@ -608,7 +608,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x7ea7ce55),
+                    rgba(0xe8500255),
                 )),
                 None,
             )

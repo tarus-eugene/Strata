@@ -2,24 +2,24 @@ param([string]$SetupPath)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 if (-not $SetupPath) {
-    $SetupPath = Get-ChildItem -Path (Join-Path $root 'dist/Strata-Setup-*-x64.exe') |
+    $SetupPath = Get-ChildItem -Path (Join-Path $root 'dist/101-Downloader-Setup-*-x64.exe') |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $SetupPath) { throw 'Build an installer first with scripts/package-installer.ps1.' }
 $uninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{E859F42A-6241-4C1F-AFC8-D5B636CDCF83}_is1'
 $existing = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($uninstallKey)
-if ($existing) { $existing.Dispose(); throw 'An installed Strata already exists. Run this test in a clean Windows account.' }
+if ($existing) { $existing.Dispose(); throw 'An installed 101 Downloader already exists. Run this test in a clean Windows account.' }
 try {
     $running = [Threading.Mutex]::OpenExisting('Local\Strata.DownloadManager')
     $running.Dispose()
-    throw 'Quit Strata from the tray before running the installer test.'
+    throw 'Quit 101 Downloader from the tray before running the installer test.'
 } catch [Threading.WaitHandleCannotBeOpenedException] {}
 
 $testRoot = Join-Path $root ('.tools/installer-test/' + [guid]::NewGuid().ToString('N'))
-$destination = Join-Path $testRoot 'Strata with spaces'
-$group = 'Strata'
-$shortcut = Join-Path $env:APPDATA "Microsoft/Windows/Start Menu/Programs/$group/Strata.lnk"
-if (Test-Path -LiteralPath $shortcut) { throw 'A Strata shortcut already exists. Run this test in a clean Windows account.' }
+$destination = Join-Path $testRoot '101 Downloader with spaces'
+$group = '101 Downloader'
+$shortcut = Join-Path $env:APPDATA "Microsoft/Windows/Start Menu/Programs/$group/101 Downloader.lnk"
+if (Test-Path -LiteralPath $shortcut) { throw 'A 101 Downloader shortcut already exists. Run this test in a clean Windows account.' }
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $retained = Join-Path $testRoot 'history-to-retain.json'
 [IO.File]::WriteAllText($retained, '{"sentinel":"keep user data"}')
@@ -48,13 +48,13 @@ try {
     $mutex = [Threading.Mutex]::new($false, 'Local\Strata.DownloadManager')
     try { Run-Setup 'running-app.log' $false } finally { $mutex.Dispose() }
     Run-Setup 'install.log'
-    foreach ($file in @('strata.exe','strata-bridge.exe','strata-cli.exe','tools/yt-dlp.exe','tools/deno.exe','tools/ffmpeg.exe','tools/ffprobe.exe','tools/README.md','vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','extension/manifest.json','extension/background.js','extension/icons/strata-128.png','extension/setup.html','LICENSE','LICENSE-APACHE','NOTICE')) {
+    foreach ($file in @('101Downloader.exe','101Downloader-Bridge.exe','101Downloader-cli.exe','tools/yt-dlp.exe','tools/deno.exe','tools/ffmpeg.exe','tools/ffprobe.exe','tools/README.md','vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','extension/manifest.json','extension/background.js','extension/icons/strata-128.png','extension/setup.html','LICENSE','LICENSE-APACHE','NOTICE')) {
         if (-not (Test-Path -LiteralPath (Join-Path $destination $file))) { throw "Installer omitted $file" }
     }
     if (Test-Path -LiteralPath (Join-Path $destination 'extension/background.test.js')) { throw 'Developer tests leaked into the installer.' }
     if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Start menu shortcut missing.' }
-    foreach ($name in @('strata-cli','yt-dlp','deno','ffmpeg','ffprobe')) {
-        $folder = if ($name -eq 'strata-cli') { $destination } else { Join-Path $destination 'tools' }
+    foreach ($name in @('101Downloader-cli','yt-dlp','deno','ffmpeg','ffprobe')) {
+        $folder = if ($name -eq '101Downloader-cli') { $destination } else { Join-Path $destination 'tools' }
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = Join-Path $folder "$name.exe"
         $start.Arguments = if ($name -in @('ffmpeg','ffprobe')) { '-version' } else { '--version' }
@@ -71,7 +71,7 @@ try {
     }
     $manifestPath = Join-Path $destination "browser/$hostName.json"
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    if ($manifest.path -ne (Join-Path $destination 'strata-bridge.exe')) { throw 'Installed bridge path is incorrect.' }
+    if ($manifest.path -ne (Join-Path $destination '101Downloader-Bridge.exe')) { throw 'Installed bridge path is incorrect.' }
     $extensionId = (Get-Content (Join-Path $root 'extension/id.txt') -Raw).Trim()
     if ($manifest.allowed_origins.Count -ne 1 -or $manifest.allowed_origins[0] -ne "chrome-extension://$extensionId/") { throw 'Unexpected allowed extension origins.' }
     foreach ($registryRoot in $roots) {
@@ -85,7 +85,7 @@ try {
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($foreignPath)
     try { $key.SetValue('', 'C:\another-strata-install\host.json') } finally { $key.Dispose() }
     Uninstall-Test
-    if (Test-Path -LiteralPath (Join-Path $destination 'strata.exe')) { throw 'Uninstall left the app executable behind.' }
+    if (Test-Path -LiteralPath (Join-Path $destination '101Downloader.exe')) { throw 'Uninstall left the app executable behind.' }
     if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the shortcut behind.' }
     if ([IO.File]::ReadAllText($retained) -ne '{"sentinel":"keep user data"}') { throw 'Uninstall modified user data.' }
     foreach ($registryRoot in $roots) {

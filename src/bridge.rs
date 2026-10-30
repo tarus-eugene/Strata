@@ -12,6 +12,16 @@ pub const EXTENSION_ID: &str = include_str!("../extension/id.txt");
 pub const MAX_MESSAGE: usize = 64 * 1024;
 pub const BROWSER_REGISTRY_ROOTS: &str = include_str!("../resources/browser-registry.txt");
 
+pub fn app_executable() -> Result<std::path::PathBuf> {
+    let executable = std::env::current_exe()?;
+    let branded = executable.with_file_name("101Downloader.exe");
+    Ok(if branded.is_file() {
+        branded
+    } else {
+        executable.with_file_name("strata.exe")
+    })
+}
+
 pub fn extension_directory() -> std::path::PathBuf {
     let installed = std::env::current_exe()
         .ok()
@@ -23,15 +33,21 @@ pub fn extension_directory() -> std::path::PathBuf {
 
 #[cfg(windows)]
 pub fn register_browsers() -> Result<()> {
-    let bridge = std::env::current_exe()?.with_file_name("strata-bridge.exe");
+    let executable = std::env::current_exe()?;
+    let branded = executable.with_file_name("101Downloader-Bridge.exe");
+    let bridge = if branded.is_file() {
+        branded
+    } else {
+        executable.with_file_name("strata-bridge.exe")
+    };
     ensure!(
         bridge.is_file(),
-        "Build strata-bridge.exe beside the Strata app first"
+        "Build strata-bridge.exe beside the 101 Downloader app first"
     );
     let directory = bridge.parent().unwrap().join("browser");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{HOST_NAME}.json"));
-    let manifest = serde_json::json!({ "name": HOST_NAME, "description": "Strata local download handoff", "path": bridge,
+    let manifest = serde_json::json!({ "name": HOST_NAME, "description": "101 Downloader local download handoff", "path": bridge,
         "type": "stdio", "allowed_origins": [format!("chrome-extension://{}/", EXTENSION_ID.trim())] });
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
     for root in BROWSER_REGISTRY_ROOTS
@@ -136,7 +152,7 @@ pub fn read_message(reader: &mut impl Read) -> Result<Request> {
     reader
         .read_exact(&mut bytes)
         .context("Truncated native message")?;
-    serde_json::from_slice(&bytes).context("Invalid Strata request")
+    serde_json::from_slice(&bytes).context("Invalid 101 Downloader request")
 }
 
 pub fn write_message(writer: &mut impl Write, reply: &Reply) -> Result<()> {
@@ -307,7 +323,7 @@ mod platform {
                     (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
                 );
             LocalFree(Some(HLOCAL(descriptor.0)));
-            result.context("Cannot open the Strata browser connection")
+            result.context("Cannot open the 101 Downloader browser connection")
         }
     }
 
@@ -371,13 +387,13 @@ mod platform {
                 Ok(pipe) => break pipe,
                 Err(error) if matches!(error.raw_os_error(), Some(2 | 231)) => {
                     if !launch {
-                        anyhow::bail!("Open Strata to connect the extension");
+                        anyhow::bail!("Open 101 Downloader to connect the extension");
                     }
                     if error.raw_os_error() == Some(2) && !launched {
-                        let app = std::env::current_exe()?.with_file_name("strata.exe");
+                        let app = super::app_executable()?;
                         ensure!(
                             app.is_file(),
-                            "Strata app is missing beside its browser bridge"
+                            "101 Downloader app is missing beside its browser bridge"
                         );
                         Command::new(app)
                             .arg("--from-browser")
@@ -389,7 +405,7 @@ mod platform {
                     }
                     ensure!(
                         start.elapsed() < Duration::from_secs(15),
-                        "Strata did not open in time; the download will stay in Chrome"
+                        "101 Downloader did not open in time; the download will stay in Chrome"
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -411,7 +427,7 @@ mod platform {
             serde_json::from_slice(&bytes).context("Invalid app reply")
         })
         .await
-        .context("Strata did not acknowledge the transfer")??;
+        .context("101 Downloader did not acknowledge the transfer")??;
         Ok(reply)
     }
 }
@@ -453,7 +469,7 @@ mod tests {
         let error = runtime
             .block_on(send(&Request::Ping, &history, false))
             .unwrap_err();
-        assert!(error.to_string().contains("Open Strata"));
+        assert!(error.to_string().contains("Open 101 Downloader"));
         assert!(history.parent().unwrap().is_dir());
     }
 

@@ -1,8 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80" viewBox="0 0 300 80">
-  <g transform="translate(8 8)" fill="#82b9e7">
-    <path d="M8 8 32 20 56 8V18L32 30 8 18Z"/>
-    <path d="M8 25 32 37 56 25V35L32 47 8 35Z"/>
-    <path d="M19 47 32 53 45 47V56L32 62 19 56Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="460" height="80" viewBox="0 0 460 80">
+  <g transform="translate(8 8)" fill="#e85002">
+    <path d="M5 13L13 7H19V37H12V16L5 20Z"/>
+    <path d="M23 7H41V13H23Z"/><path d="M23 13H29V31H23Z"/><path d="M35 13H41V31H35Z"/><path d="M23 31H41V37H23Z"/>
+    <path d="M45 13L53 7H59V37H52V16L45 20Z"/>
+    <path d="M28 41H36V48H47L32 61 17 48H28Z"/>
   </g>
-  <text x="90" y="56" fill="#f0f1f2" font-family="Segoe UI, sans-serif" font-size="46" font-weight="600" letter-spacing="-1">strata</text>
+  <text x="86" y="53" fill="#f9f9f9" font-family="Segoe UI, sans-serif" font-size="38" font-weight="600">101 Downloader</text>
 </svg>

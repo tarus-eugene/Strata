@@ -21,7 +21,7 @@ impl Manager {
                             ..Default::default()
                         }),
                         runtime_worker_threads: Some(4),
-                        client_name_and_version: Some("Strata/0.1".into()),
+                        client_name_and_version: Some("101Downloader/0.2".into()),
                         ..Default::default()
                     },
                 )

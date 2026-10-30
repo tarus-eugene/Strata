@@ -8,10 +8,10 @@ $entries = @()
 foreach ($dimension in @(16, 32, 48, 128, 256)) {
     $large = [Drawing.Bitmap]::new($dimension * 4, $dimension * 4)
     $graphics = [Drawing.Graphics]::FromImage($large)
-    $graphics.Clear([Drawing.Color]::FromArgb(12, 13, 15))
+    $graphics.Clear([Drawing.Color]::FromArgb(0, 0, 0))
     $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $graphics.ScaleTransform($large.Width / 64.0, $large.Height / 64.0)
-    $brush = [Drawing.SolidBrush]::new([Drawing.Color]::FromArgb(130, 185, 231))
+    $brush = [Drawing.SolidBrush]::new([Drawing.Color]::FromArgb(232, 80, 2))
     # The SVG consists of straight, filled polygons. Read it as the single source of truth.
     foreach ($path in $paths) {
         $drawing = [Drawing.Drawing2D.GraphicsPath]::new()

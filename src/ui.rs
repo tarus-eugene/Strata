@@ -10,16 +10,16 @@ use std::{
 };
 use strata::engine::{Download, Manager, Status};
 
-const BG: u32 = 0x0c0d0f;
-const SURFACE: u32 = 0x151719;
-const RAISED: u32 = 0x242629;
-const RULE: u32 = 0x252729;
-const TEXT: u32 = 0xf0f1f2;
-const MUTED: u32 = 0xb4b6b8;
-const FAINT: u32 = 0x92969a;
-const BLUE: u32 = 0x82b9e7;
-const AMBER: u32 = 0xe4bc73;
-const RED: u32 = 0xef8e91;
+const BG: u32 = 0x000000;
+const SURFACE: u32 = 0x191919;
+const RAISED: u32 = 0x333333;
+const RULE: u32 = 0x333333;
+const TEXT: u32 = 0xf9f9f9;
+const MUTED: u32 = 0xa7a7a7;
+const FAINT: u32 = 0xa7a7a7;
+const ACCENT: u32 = 0xe85002;
+const AMBER: u32 = 0xd9c3ab;
+const RED: u32 = 0xf5988f;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -130,9 +130,9 @@ impl Strata {
                         svg()
                             .path("brand/mark.svg")
                             .size(px(25.))
-                            .text_color(rgb(BLUE)),
+                            .text_color(rgb(ACCENT)),
                     )
-                    .child(label("strata", 17., TEXT).font_weight(FontWeight::SEMIBOLD)),
+                    .child(label("101 Downloader", 17., TEXT).font_weight(FontWeight::SEMIBOLD)),
             )
             .child(label("Download manager", 12., FAINT).flex_1())
             .child(
@@ -708,7 +708,7 @@ impl Strata {
                                         },
                                     ))
                                     .child(label(text, 13., TEXT).flex_1())
-                                    .when(chosen, |d| d.child(icon(Icon::Check, 14., BLUE)))
+                                    .when(chosen, |d| d.child(icon(Icon::Check, 14., ACCENT)))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.run_menu_action(action, window, cx);
@@ -874,7 +874,7 @@ impl Strata {
         } else if self.downloads.is_empty() {
             (
                 "Make room for what’s next.",
-                "Add a link. Strata takes care of the transfer.",
+                "Add a link. 101 Downloader takes care of the transfer.",
             )
         } else {
             (
@@ -1404,7 +1404,7 @@ impl Strata {
                 .child(transport_input("HTTP / HTTPS / SOCKS5 proxy", self.proxy.clone()))
                 .child(transport_input("SFTP private key (optional)", self.identity.clone()))
                 .child(transport_input("SFTP known_hosts file (optional)", self.known_hosts.clone()))
-                .child(label("SFTP refuses unknown or changed host keys. Verify the host with OpenSSH first. Encrypted keys can use strata-cli --key-passphrase-stdin.", 12., FAINT).max_w(px(620.)))
+                .child(label("SFTP refuses unknown or changed host keys. Verify the host with OpenSSH first. Encrypted keys can use 101Downloader-cli --key-passphrase-stdin.", 12., FAINT).max_w(px(620.)))
                 .child(button("save-transport", "Save connection settings", Icon::Link, false).on_click(cx.listener(|this, _, _, cx| this.save_transport(cx))))
                 .children(self.transport_notice.as_ref().map(|message| label(message, 12., MUTED))))
             .child(div().mt(px(10.)).p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
@@ -1414,17 +1414,17 @@ impl Strata {
                 .child(button("choose-folder", "Choose folder", Icon::Folder, false).on_click(cx.listener(|this, _, window, cx| this.choose_directory(window, cx)))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Connections per download", 15., TEXT).font_weight(FontWeight::MEDIUM))
-                .child(label("More connections can help on some servers. Strata uses fewer for small files and servers that need a single connection.", 13., MUTED).max_w(px(620.)))
+                .child(label("More connections can help on some servers. 101 Downloader uses fewer for small files and servers that need a single connection.", 13., MUTED).max_w(px(620.)))
                 .child(div().flex().gap(px(10.)).children([1, 4, 8, 16].into_iter().map(|n| {
                     div().id(ElementId::Name(format!("connections-{n}").into())).w(px(64.)).h(px(36.)).flex().items_center().justify_center().cursor_pointer()
                         .bg(rgb(if self.connections == n { TEXT } else { RAISED })).text_color(rgb(if self.connections == n { BG } else { MUTED }))
-                        .focusable().focus(|s| s.border_1().border_color(rgb(BLUE))).hover(|s| s.opacity(0.85)).child(n.to_string())
+                        .focusable().focus(|s| s.border_1().border_color(rgb(ACCENT))).hover(|s| s.opacity(0.85)).child(n.to_string())
                         .on_click(cx.listener(move |this, _, _, cx| this.set_connections(n, cx)))
                 }))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Browser companion", 15., TEXT).font_weight(FontWeight::MEDIUM))
-                .child(label("Capture file downloads in Chromium browsers and send them straight to Strata. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
-                .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in your browser." }, 12., if self.browser_registered { BLUE } else { FAINT }))
+                .child(label("Capture file downloads in Chromium browsers and send them straight to 101 Downloader. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
+                .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in your browser." }, 12., if self.browser_registered { ACCENT } else { FAINT }))
                 .child(div().flex().gap(px(12.))
                     .child(button("connect-chrome", if self.browser_registered { "Reconnect browsers" } else { "Connect browsers" }, Icon::Link, true).on_click(cx.listener(|this, _, _, cx| {
                         match strata::bridge::register_browsers() {
@@ -1436,7 +1436,7 @@ impl Strata {
                 .children(self.browser_notice.as_ref().map(|message| label(message, 12., MUTED)))
                 .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
             .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))
-            .when(self.tray.is_some(), |view| view.child(label("Closing the window keeps downloads running in the system tray. Right-click the tray icon and choose Quit Strata to exit.", 12., FAINT)))
+            .when(self.tray.is_some(), |view| view.child(label("Closing the window keeps downloads running in the system tray. Right-click the tray icon and choose Quit 101 Downloader to exit.", 12., FAINT)))
         ))
     }
 }
@@ -1643,7 +1643,7 @@ fn button(id: impl Into<SharedString>, text: &str, glyph: Icon, primary: bool) -
         .font_weight(FontWeight::MEDIUM)
         .hover(|s| s.bg(rgb(if primary { 0xd5d8db } else { 0x33363a })))
         .focusable()
-        .focus(|s| s.border_1().border_color(rgb(BLUE)))
+        .focus(|s| s.border_1().border_color(rgb(ACCENT)))
         .child(icon(glyph, 15., if primary { BG } else { MUTED }))
         .child(text.to_owned())
 }
@@ -1675,7 +1675,7 @@ fn window_control(id: &'static str, glyph: Icon, area: WindowControlArea) -> Sta
         .focus(|s| s.bg(rgb(RAISED)))
         .hover(|s| {
             s.bg(rgb(if area == WindowControlArea::Close {
-                0xb73d49
+                0xc10801
             } else {
                 RAISED
             }))
@@ -1732,8 +1732,10 @@ fn clamp_details_height(requested: f32, viewport: f32) -> f32 {
 
 fn segment_layout(parts: &[strata::engine::Part], known_size: bool) -> Vec<(f32, f32)> {
     let total: f64 = parts.iter().map(|part| part.len() as f64).sum();
-    parts
-        .iter()
+    let mut ordered = parts.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|part| part.start);
+    ordered
+        .into_iter()
         .map(|part| {
             (
                 (part.len() as f64 / total) as f32,
@@ -1782,7 +1784,7 @@ fn segmented_progress(download: &Download) -> Div {
 
 fn status_color(status: Status) -> u32 {
     match status {
-        Status::Downloading | Status::Complete => BLUE,
+        Status::Downloading | Status::Complete => ACCENT,
         Status::Paused | Status::Pausing => AMBER,
         Status::Failed => RED,
         _ => FAINT,
@@ -1991,6 +1993,24 @@ mod tests {
             true,
         );
         assert_eq!(segments, vec![(0.25, 0.5), (0.75, 1.)]);
+        assert_eq!(
+            segment_layout(
+                &[
+                    Part {
+                        start: 100,
+                        end: 399,
+                        downloaded: 300
+                    },
+                    Part {
+                        start: 0,
+                        end: 99,
+                        downloaded: 50
+                    },
+                ],
+                true
+            ),
+            segments
+        );
         assert!(segment_layout(&[], true).is_empty());
         assert_eq!(
             segment_layout(

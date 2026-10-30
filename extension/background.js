@@ -70,15 +70,15 @@ export async function captureDownload(item, api) {
     const download = { ...item, ...current, filename: usefulFilename(current.filename) ? current.filename : (item.filename || current.filename) };
     const reply = await api.runtime.sendNativeMessage(HOST, nativeRequest(download));
     if (reply?.ok !== true || !Number.isSafeInteger(reply.id) || reply.id <= 0) {
-      throw new Error(reply?.error || 'Strata did not accept the download.');
+      throw new Error(reply?.error || '101 Downloader did not accept the download.');
     }
     accepted = true;
     await api.storage.local.set({ [key]: { id: item.id, startTime: item.startTime, phase: 'accepted', appId: reply.id } });
     try {
       await api.downloads.cancel(item.id);
-      await record(api, `Sent ${nativeRequest({ ...item, ...current }).filename || 'download'} to Strata.`);
+      await record(api, `Sent ${nativeRequest({ ...item, ...current }).filename || 'download'} to 101 Downloader.`);
     } catch {
-      await record(api, 'Sent to Strata. Your browser could not clear its paused copy; you can cancel it from its downloads page.', true);
+      await record(api, 'Sent to 101 Downloader. Your browser could not clear its paused copy; you can cancel it from its downloads page.', true);
     }
     return true;
   } catch (error) {
@@ -128,7 +128,7 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
   chrome.runtime.onInstalled.addListener(async () => {
     await syncDownloadUi(chrome);
     await chrome.contextMenus.removeAll();
-    chrome.contextMenus.create({ id: 'send-to-strata', title: 'Download with Strata',
+    chrome.contextMenus.create({ id: 'send-to-strata', title: 'Download with 101 Downloader',
       contexts: ['link'] });
   });
   chrome.downloads.onCreated.addListener(item => {
@@ -150,8 +150,8 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
         action: 'download', url: info.linkUrl,
         referrer: /^https?:\/\//i.test(info.pageUrl || '') ? info.pageUrl : null,
       });
-      if (!reply?.ok) throw new Error(reply?.error || 'Strata did not accept this link.');
-      await record(chrome, 'Link sent to Strata.');
+      if (!reply?.ok) throw new Error(reply?.error || '101 Downloader did not accept this link.');
+      await record(chrome, 'Link sent to 101 Downloader.');
     } catch (error) { await record(chrome, error.message, true); }
   });
 }

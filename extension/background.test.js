@@ -64,7 +64,7 @@ test('an unavailable download UI API never prevents a successful handoff', async
   assert.equal(await captureDownload(item, api), true);
 });
 
-test('leaves browser UI available for downloads Strata cannot capture', async () => {
+test('leaves browser UI available for downloads 101 Downloader cannot capture', async () => {
   const api = mock();
   await captureDownload({ ...item, url: 'blob:https://example.com/id' }, api);
   assert.deepEqual(api.ui, [true]);

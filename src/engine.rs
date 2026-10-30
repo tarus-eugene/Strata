@@ -20,6 +20,7 @@ use tokio::{
 };
 use url::Url;
 
+mod chunks;
 mod deletion;
 mod ftp;
 mod metalink;
@@ -251,7 +252,9 @@ impl Manager {
                 .expect("Cannot initialize download workers")
         });
         let client = Client::builder()
-            .user_agent("Strata/0.1")
+            .pool_max_idle_per_host(16)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .user_agent("101Downloader/0.2")
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -611,7 +614,9 @@ impl Manager {
     fn client_for(&self, options: &TransferOptions) -> Result<Client> {
         if let Some(proxy) = &options.proxy {
             Ok(Client::builder()
-                .user_agent("Strata/0.1")
+                .pool_max_idle_per_host(16)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .user_agent("101Downloader/0.2")
                 .connect_timeout(Duration::from_secs(15))
                 .read_timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::limited(10))
@@ -651,7 +656,24 @@ impl Manager {
         } else {
             None
         };
-        drop(probe);
+        if ranged {
+            let mut stream = probe.bytes_stream();
+            let mut received = 0;
+            while let Some(bytes) = tokio::select! { bytes = stream.next() => bytes, _ = stopped(job) => bail!("Transfer stopped") }
+            {
+                received += bytes?.len();
+                ensure!(
+                    received <= 1,
+                    "The server returned too much data for the range probe"
+                );
+            }
+            ensure!(
+                received == 1,
+                "The range probe ended before its byte arrived"
+            );
+        } else {
+            drop(probe);
+        }
         check_running(job)?;
         let old = job.data.lock().unwrap().clone();
         let dir = old.parts_dir();
@@ -660,14 +682,16 @@ impl Manager {
             && old.total == total
             && old.validator == validator
             && !old.parts.is_empty();
+        if reuse {
+            chunks::ordered_indices(&old.parts, total.unwrap())?;
+        }
         fs::create_dir_all(&dir).context("Cannot create partial download folder")?;
         let parts = if ranged {
             let size = total.unwrap();
-            let count = old.connections.min((size / MIN_PART).max(1) as usize);
             if reuse {
                 old.parts.clone()
             } else {
-                partition(size, count)
+                chunks::plan(size, old.connections)
             }
         } else {
             vec![Part {
@@ -699,25 +723,15 @@ impl Manager {
             d.downloaded = d.parts.iter().map(|p| p.downloaded).sum();
             d.status = Status::Downloading;
         }
-        let part_count = job.data.lock().unwrap().parts.len();
-        let mut workers = JoinSet::new();
-        for index in 0..part_count {
-            let job = job.clone();
-            let client = client.clone();
-            workers.spawn(async move { download_part(client, job, index).await });
-        }
-        let mut failure = None;
-        while let Some(result) = workers.join_next().await {
-            if let Err(e) = result.context("Connection worker stopped").and_then(|v| v) {
-                failure = Some(e);
-            }
-        }
-        if let Some(e) = failure {
-            return Err(e);
-        }
+        chunks::download(job.clone(), client).await?;
         check_running(job)?;
         self.adopt_response_name(job)?;
         let d = job.data.lock().unwrap().clone();
+        let ordered = if d.ranged {
+            chunks::ordered_indices(&d.parts, d.total.unwrap())?
+        } else {
+            (0..d.parts.len()).collect()
+        };
         ensure!(
             d.total.is_none_or(|n| n == d.downloaded),
             "Downloaded size does not match the server's file size"
@@ -729,7 +743,7 @@ impl Manager {
             .write(true)
             .open(output.path())
             .await?;
-        for i in 0..part_count {
+        for i in ordered {
             let mut part = tokio::fs::File::open(dir.join(format!("{i}.part"))).await?;
             tokio::io::copy(&mut part, &mut writer).await?;
         }
@@ -745,10 +759,7 @@ impl Manager {
             data.error = None;
         }
         // This directory is exclusively owned by this transfer and contains only its parts.
-        for i in 0..part_count {
-            let _ = fs::remove_file(dir.join(format!("{i}.part")));
-        }
-        let _ = fs::remove_dir(dir);
+        let _ = fs::remove_dir_all(dir);
         Ok(())
     }
 }
@@ -767,10 +778,17 @@ fn check_running(job: &Job) -> Result<()> {
     Ok(())
 }
 
-async fn download_part(client: Client, job: Arc<Job>, index: usize) -> Result<()> {
+async fn download_part(
+    client: Client,
+    job: Arc<Job>,
+    index: usize,
+    split: &AtomicBool,
+    abort: &AtomicBool,
+) -> Result<chunks::Outcome> {
     for attempt in 0..4 {
         check_running(&job)?;
-        let result = transfer_part(&client, &job, index).await;
+        ensure!(!abort.load(Ordering::SeqCst), "Another connection failed");
+        let result = transfer_part(&client, &job, index, split, abort).await;
         if result.is_ok() {
             return result;
         }
@@ -780,13 +798,22 @@ async fn download_part(client: Client, job: Arc<Job>, index: usize) -> Result<()
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))) => {},
-            _ = stopped(&job) => bail!("Transfer stopped"),
+            reason = chunks::interrupted(&job, split, abort) => match reason {
+                chunks::Interrupt::Split => return Ok(chunks::Outcome::Split),
+                chunks::Interrupt::Stop => bail!("Transfer stopped"),
+            },
         }
     }
     unreachable!()
 }
 
-async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<()> {
+async fn transfer_part(
+    client: &Client,
+    job: &Arc<Job>,
+    index: usize,
+    split: &AtomicBool,
+    abort: &AtomicBool,
+) -> Result<chunks::Outcome> {
     let d = job.data.lock().unwrap().clone();
     let part = &d.parts[index];
     let path = d.parts_dir().join(format!("{index}.part"));
@@ -796,7 +823,7 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
         0
     };
     if d.ranged && offset == part.len() {
-        return Ok(());
+        return Ok(chunks::Outcome::Complete);
     }
     let mut request = download_request(client, &d)?;
     if d.ranged {
@@ -810,7 +837,10 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
     }
     let response = tokio::select! {
         response = request.send() => response?,
-        _ = stopped(job) => bail!("Transfer stopped"),
+        reason = chunks::interrupted(job, split, abort) => match reason {
+            chunks::Interrupt::Split => return Ok(chunks::Outcome::Split),
+            chunks::Interrupt::Stop => bail!("Transfer stopped"),
+        },
     };
     response.error_for_status_ref()?;
     ensure_identity(&response)?;
@@ -865,17 +895,27 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
     loop {
         let chunk = tokio::select! {
             chunk = stream.next() => chunk,
-            _ = stopped(job) => { file.flush().await?; bail!("Transfer stopped"); },
+            reason = chunks::interrupted(job, split, abort) => {
+                file.flush().await?;
+                match reason {
+                    chunks::Interrupt::Split => return Ok(chunks::Outcome::Split),
+                    chunks::Interrupt::Stop => bail!("Transfer stopped"),
+                }
+            },
         };
         let Some(chunk) = chunk else {
             break;
         };
-        let chunk = chunk?;
-        if d.ranged {
-            ensure!(
-                received + chunk.len() as u64 <= part.len(),
-                "Server sent more bytes than requested"
-            );
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                file.flush().await?;
+                return Err(error.into());
+            }
+        };
+        if d.ranged && received + chunk.len() as u64 > part.len() {
+            file.flush().await?;
+            bail!("Server sent more bytes than requested");
         }
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;
@@ -895,7 +935,7 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
             "Connection ended before the file was complete"
         );
     }
-    Ok(())
+    Ok(chunks::Outcome::Complete)
 }
 
 fn ensure_identity(response: &reqwest::Response) -> Result<()> {
@@ -1049,19 +1089,45 @@ fn available_name(directory: &Path, base: &str, reserved: &[PathBuf]) -> Result<
 }
 
 pub fn history_path() -> PathBuf {
-    if let Some(directory) = std::env::var_os("STRATA_DATA_DIR") {
+    if let Some(directory) =
+        std::env::var_os("DOWNLOADER101_DATA_DIR").or_else(|| std::env::var_os("STRATA_DATA_DIR"))
+    {
         return PathBuf::from(directory).join("history.json");
     }
-    std::env::var_os("LOCALAPPDATA")
+    let root = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Strata")
-        .join("history.json")
+        .unwrap_or_else(std::env::temp_dir);
+    compatible_history(&root)
+}
+
+fn compatible_history(root: &Path) -> PathBuf {
+    let current = root.join("101 Downloader").join("history.json");
+    let legacy = root.join("Strata").join("history.json");
+    if !current.exists() && legacy.exists() {
+        legacy
+    } else {
+        current
+    }
 }
 
 #[cfg(test)]
 mod settings_tests {
     use super::Settings;
+
+    #[test]
+    fn rebrand_preserves_legacy_history_and_prefers_existing_new_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("101 Downloader/history.json");
+        let legacy = directory.path().join("Strata/history.json");
+        assert_eq!(super::compatible_history(directory.path()), current);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"legacy history").unwrap();
+        assert_eq!(super::compatible_history(directory.path()), legacy);
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"new history").unwrap();
+        assert_eq!(super::compatible_history(directory.path()), current);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"legacy history");
+    }
 
     #[test]
     fn legacy_settings_default_panel_height_and_new_height_round_trips() {

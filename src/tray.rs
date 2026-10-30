@@ -66,7 +66,7 @@ impl Tray {
             let window = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 w!("Strata.TrayWindow"),
-                w!("Strata"),
+                w!("101 Downloader"),
                 WS_POPUP,
                 0,
                 0,
@@ -89,7 +89,7 @@ impl Tray {
                 let mut tip = [0u16; 128];
                 for (target, ch) in tip
                     .iter_mut()
-                    .zip("Strata - Download manager".encode_utf16())
+                    .zip("101 Downloader - Download manager".encode_utf16())
                 {
                     *target = ch;
                 }
@@ -105,7 +105,7 @@ impl Tray {
                 });
                 ensure!(
                     state.add_icon(),
-                    "Windows could not add the Strata system tray icon"
+                    "Windows could not add the 101 Downloader system tray icon"
                 );
                 Ok(())
             })();
@@ -182,9 +182,9 @@ impl TrayState {
                 return;
             };
             let result = (|| -> windows::core::Result<()> {
-                AppendMenuW(menu, MF_STRING, OPEN as usize, w!("Open Strata"))?;
+                AppendMenuW(menu, MF_STRING, OPEN as usize, w!("Open 101 Downloader"))?;
                 AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
-                AppendMenuW(menu, MF_STRING, QUIT as usize, w!("Quit Strata"))?;
+                AppendMenuW(menu, MF_STRING, QUIT as usize, w!("Quit 101 Downloader"))?;
                 let mut position = POINT::default();
                 GetCursorPos(&mut position)?;
                 let _ = SetForegroundWindow(owner);
@@ -293,7 +293,7 @@ mod tests {
             let main = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 w!("STATIC"),
-                w!("Strata tray test"),
+                w!("101 Downloader tray test"),
                 WS_POPUP,
                 0,
                 0,
@@ -306,7 +306,7 @@ mod tests {
             )
             .unwrap();
             let tray = Tray::from_handle(main)
-                .expect("The test needs Windows Explorer and the embedded Strata icon");
+                .expect("The test needs Windows Explorer and the embedded 101 Downloader icon");
             let pump = || {
                 let mut message = MSG::default();
                 while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {

@@ -152,7 +152,7 @@ fn protect(bytes: &[u8], decrypt: bool) -> Result<Vec<u8>> {
         } else {
             CryptProtectData(
                 &input,
-                windows::core::w!("Strata credentials"),
+                windows::core::w!("101 Downloader credentials"),
                 None,
                 None,
                 None,

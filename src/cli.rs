@@ -7,7 +7,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "strata-cli", version, about = "Queue a transfer in the Strata desktop app",
+#[command(name = "101Downloader-cli", version, about = "Queue a transfer in the 101 Downloader desktop app",
     group(clap::ArgGroup::new("protocol").args(["ftp", "sftp", "webdav", "metalink", "ytdlp"]).multiple(false)))]
 pub struct Cli {
     /// URL, magnet link, or local .torrent / .meta4 / .metalink descriptor

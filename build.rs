@@ -5,6 +5,6 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/brand/strata.ico");
         embed_resource::compile("resources/strata.rc", embed_resource::NONE)
             .manifest_optional()
-            .expect("Cannot embed the Strata icon");
+            .expect("Cannot embed the 101 Downloader icon");
     }
 }

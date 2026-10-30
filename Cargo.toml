@@ -1,8 +1,8 @@
 [package]
 name = "strata"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
-description = "A native parallel download manager built with GPUI"
+description = "101 Downloader: a native parallel download manager built with GPUI"
 license = "MIT"
 default-run = "strata"
 

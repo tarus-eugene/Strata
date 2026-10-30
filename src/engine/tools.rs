@@ -109,7 +109,7 @@ pub(super) fn executable(name: &str) -> Result<PathBuf> {
         }
     }
     bail!(
-        "{exe_name} is missing. Install Strata's media tools or put the tool in the app's tools folder or PATH."
+        "{exe_name} is missing. Install 101 Downloader's media tools or put the tool in the app's tools folder or PATH."
     )
 }
 
