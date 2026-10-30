@@ -202,7 +202,7 @@ impl Strata {
             error: None,
             focus,
             compact: false,
-            browser_registered: strata::bridge::chrome_registered(),
+            browser_registered: strata::bridge::browsers_registered(),
             browser_notice: None,
             directory: settings.directory,
             connections: settings.connections,
@@ -1121,17 +1121,17 @@ impl Strata {
                         .on_click(cx.listener(move |this, _, _, cx| this.set_connections(n, cx)))
                 }))))
             .child(div().p(px(22.)).rounded(px(12.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
-                .child(label("Chrome companion", 15., TEXT).font_weight(FontWeight::MEDIUM))
-                .child(label("Capture file downloads in Chrome and send them straight to Strata. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
-                .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in Chrome." }, 12., if self.browser_registered { BLUE } else { FAINT }))
+                .child(label("Browser companion", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label("Capture file downloads in Chromium browsers and send them straight to Strata. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
+                .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in your browser." }, 12., if self.browser_registered { BLUE } else { FAINT }))
                 .child(div().flex().gap(px(12.))
-                    .child(button("connect-chrome", if self.browser_registered { "Reconnect Chrome" } else { "Connect Chrome" }, Icon::Link, true).on_click(cx.listener(|this, _, _, cx| {
-                        match strata::bridge::register_chrome() {
-                            Ok(()) => { this.browser_registered = true; this.browser_notice = Some("Connected. Load the extension folder in chrome://extensions to finish setup.".into()); },
+                    .child(button("connect-chrome", if self.browser_registered { "Reconnect browsers" } else { "Connect browsers" }, Icon::Link, true).on_click(cx.listener(|this, _, _, cx| {
+                        match strata::bridge::register_browsers() {
+                            Ok(()) => { this.browser_registered = true; this.browser_notice = Some("Connected. Load the extension folder from your browser extensions page to finish setup.".into()); },
                             Err(error) => this.browser_notice = Some(format!("Could not connect: {error:#}")),
                         } cx.notify();
                     })))
-                    .child(button("extension-folder", "Extension folder", Icon::Folder, false).on_click(|_, _, _| reveal(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extension")))))
+                    .child(button("extension-folder", "Extension folder", Icon::Folder, false).on_click(|_, _, _| reveal(&strata::bridge::extension_directory()))))
                 .children(self.browser_notice.as_ref().map(|message| label(message, 12., MUTED)))
                 .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
             .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))

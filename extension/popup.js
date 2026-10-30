@@ -20,7 +20,7 @@ $('capture').checked = stored.captureEnabled !== false;
 if (stored.lastResult) result(stored.lastResult.message, stored.lastResult.error);
 $('capture').addEventListener('change', async () => {
   await chrome.storage.local.set({ captureEnabled: $('capture').checked });
-  result($('capture').checked ? 'New file downloads will be sent to Strata.' : 'New downloads will stay in Chrome.');
+  result($('capture').checked ? 'New file downloads will be sent to Strata.' : 'New downloads will stay in your browser.');
 });
 $('refresh').addEventListener('click', check);
 $('send-form').addEventListener('submit', async event => {

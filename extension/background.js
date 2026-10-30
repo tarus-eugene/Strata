@@ -48,14 +48,14 @@ export async function captureDownload(item, api) {
       await api.downloads.cancel(item.id);
       await record(api, `Sent ${nativeRequest({ ...item, ...current }).filename || 'download'} to Strata.`);
     } catch {
-      await record(api, 'Sent to Strata. Chrome could not clear its paused copy; you can cancel it in Chrome.', true);
+      await record(api, 'Sent to Strata. Your browser could not clear its paused copy; you can cancel it from its downloads page.', true);
     }
     return true;
   } catch (error) {
-    let message = 'Kept in Chrome. ' + error.message;
+    let message = 'Kept in your browser. ' + error.message;
     if (paused && !accepted) {
       try { await api.downloads.resume(item.id); }
-      catch { message = 'Open Chrome Downloads to resume this file. ' + error.message; }
+      catch { message = 'Open your browser downloads page to resume this file. ' + error.message; }
     }
     await record(api, message, true);
     return false;

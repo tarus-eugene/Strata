@@ -10,39 +10,75 @@ use std::{
 pub const HOST_NAME: &str = "com.strata.download_manager";
 pub const EXTENSION_ID: &str = include_str!("../extension/id.txt");
 pub const MAX_MESSAGE: usize = 64 * 1024;
+pub const BROWSER_REGISTRY_ROOTS: &str = include_str!("../resources/browser-registry.txt");
+
+pub fn extension_directory() -> std::path::PathBuf {
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("extension")));
+    installed
+        .filter(|path| path.join("manifest.json").is_file())
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("extension"))
+}
 
 #[cfg(windows)]
-pub fn register_chrome() -> Result<()> {
+pub fn register_browsers() -> Result<()> {
     let bridge = std::env::current_exe()?.with_file_name("strata-bridge.exe");
     ensure!(
         bridge.is_file(),
         "Build strata-bridge.exe beside the Strata app first"
     );
-    let directory = crate::engine::history_path()
-        .parent()
-        .unwrap()
-        .join("browser");
+    let directory = bridge.parent().unwrap().join("browser");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{HOST_NAME}.json"));
     let manifest = serde_json::json!({ "name": HOST_NAME, "description": "Strata local download handoff", "path": bridge,
         "type": "stdio", "allowed_origins": [format!("chrome-extension://{}/", EXTENSION_ID.trim())] });
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
-    windows_registry::CURRENT_USER
-        .create(format!(
-            r"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
-        ))?
-        .set_string("", path.to_string_lossy())?;
+    for root in BROWSER_REGISTRY_ROOTS
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        windows_registry::CURRENT_USER
+            .create(format!(r"{root}\{HOST_NAME}"))?
+            .set_string("", path.to_string_lossy())?;
+    }
     Ok(())
 }
 
 #[cfg(windows)]
-pub fn chrome_registered() -> bool {
-    windows_registry::CURRENT_USER
-        .open(format!(
-            r"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
-        ))
-        .and_then(|key| key.get_string(""))
-        .is_ok_and(|path| Path::new(&path).is_file())
+pub fn unregister_browsers() -> Result<()> {
+    let manifest = std::env::current_exe()?
+        .parent()
+        .unwrap()
+        .join("browser")
+        .join(format!("{HOST_NAME}.json"));
+    for root in BROWSER_REGISTRY_ROOTS
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        let path = format!(r"{root}\{HOST_NAME}");
+        let owned = windows_registry::CURRENT_USER
+            .open(&path)
+            .and_then(|key| key.get_string(""))
+            .is_ok_and(|value| value.eq_ignore_ascii_case(&manifest.to_string_lossy()));
+        if owned {
+            windows_registry::CURRENT_USER.remove_tree(&path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn browsers_registered() -> bool {
+    BROWSER_REGISTRY_ROOTS
+        .lines()
+        .filter(|line| !line.is_empty())
+        .all(|root| {
+            windows_registry::CURRENT_USER
+                .open(format!(r"{root}\{HOST_NAME}"))
+                .and_then(|key| key.get_string(""))
+                .is_ok_and(|path| Path::new(&path).is_file())
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -19,7 +19,7 @@ async fn run() -> anyhow::Result<Reply> {
     let expected = format!("chrome-extension://{}/", bridge::EXTENSION_ID.trim());
     anyhow::ensure!(
         std::env::args().nth(1).as_deref() == Some(expected.as_str()),
-        "This bridge only accepts the Strata Chrome extension"
+        "This bridge only accepts the Strata browser extension"
     );
     let request = bridge::read_message(&mut std::io::stdin().lock())?;
     #[cfg(windows)]

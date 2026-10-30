@@ -1,0 +1,3 @@
+Software\Google\Chrome\NativeMessagingHosts
+Software\Chromium\NativeMessagingHosts
+Software\Microsoft\Edge\NativeMessagingHosts
