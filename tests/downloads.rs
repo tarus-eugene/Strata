@@ -379,3 +379,51 @@ fn rejects_incorrect_ranges_and_never_overwrites_existing_files() {
     assert_eq!(std::fs::read(d.path()).unwrap(), b"keep me");
     manager.shutdown();
 }
+
+#[test]
+fn browser_handoff_preserves_safe_name_and_referrer() {
+    let server = Server::new();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Manager::new(dir.path().join("history.json")).unwrap();
+    manager.settings.lock().unwrap().directory = dir.path().into();
+    let referrer = server.url("/downloads");
+    let id = manager
+        .add_from_browser(
+            &server.url("/file.bin"),
+            Some(r"C:\Downloads\..\browser-file.bin"),
+            Some(&referrer),
+        )
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(done.name, "browser-file.bin");
+    assert_eq!(done.directory, dir.path());
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.contains(&format!("referer: {referrer}")))
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn refuses_browser_handoff_if_history_cannot_be_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"file").unwrap();
+    let manager = Manager::new(blocked.join("history.json")).unwrap();
+    manager.settings.lock().unwrap().directory = dir.path().into();
+    assert!(
+        manager
+            .add_from_browser("https://example.com/file.bin", None, None)
+            .is_err()
+    );
+    assert!(manager.snapshots().is_empty());
+    manager.shutdown();
+}

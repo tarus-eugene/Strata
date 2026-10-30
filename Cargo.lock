@@ -4303,9 +4303,11 @@ name = "strata"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "futures-util",
  "gpui",
  "percent-encoding",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
@@ -4313,6 +4315,8 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "url",
+ "windows",
+ "windows-registry 0.5.3",
 ]
 
 [[package]]

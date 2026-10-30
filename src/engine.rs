@@ -94,6 +94,8 @@ pub struct Download {
     pub error: Option<String>,
     pub connections: usize,
     pub created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrer: Option<String>,
 }
 
 impl Download {
@@ -159,6 +161,7 @@ pub struct Manager {
     history: PathBuf,
     save_lock: Mutex<()>,
     pub persistence_error: Mutex<Option<String>>,
+    pub browser_error: Mutex<Option<String>>,
 }
 
 impl Manager {
@@ -210,6 +213,7 @@ impl Manager {
             history,
             save_lock: Mutex::new(()),
             persistence_error: Mutex::new(None),
+            browser_error: Mutex::new(None),
         });
         let weak = Arc::downgrade(&manager);
         manager.runtime.spawn(async move {
@@ -239,11 +243,50 @@ impl Manager {
         directory: PathBuf,
         connections: usize,
     ) -> Result<u64> {
+        self.add_with_metadata(input, directory, connections, None, None)
+    }
+
+    pub(crate) fn runtime_handle(&self) -> Handle {
+        self.runtime.clone()
+    }
+
+    pub fn add_from_browser(
+        self: &Arc<Self>,
+        input: &str,
+        name: Option<&str>,
+        referrer: Option<&str>,
+    ) -> Result<u64> {
+        let settings = self.settings.lock().unwrap().clone();
+        let referrer = referrer
+            .filter(|s| !s.is_empty())
+            .map(validate_url)
+            .transpose()?
+            .map(|u| u.to_string());
+        let name = name
+            .filter(|s| !s.is_empty())
+            .map(|s| sanitize_filename(s.rsplit(['/', '\\']).next().unwrap_or(s)));
+        self.add_with_metadata(
+            input,
+            settings.directory,
+            settings.connections,
+            name,
+            referrer,
+        )
+    }
+
+    fn add_with_metadata(
+        self: &Arc<Self>,
+        input: &str,
+        directory: PathBuf,
+        connections: usize,
+        suggested_name: Option<String>,
+        referrer: Option<String>,
+    ) -> Result<u64> {
         let url = validate_url(input)?;
         ensure!(directory.is_dir(), "Choose an existing download folder.");
         let mut jobs = self.jobs.lock().unwrap();
         let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
-        let base = filename(&url);
+        let base = suggested_name.unwrap_or_else(|| filename(&url));
         let name = available_name(
             &directory,
             &base,
@@ -267,6 +310,7 @@ impl Manager {
                 error: None,
                 connections: connections.clamp(1, 16),
                 created: id / 1_000_000,
+                referrer,
             }),
             control: AtomicU8::new(RUN),
             running: AtomicBool::new(false),
@@ -274,6 +318,13 @@ impl Manager {
         jobs.push(job.clone());
         drop(jobs);
         self.persist();
+        if let Some(error) = self.persistence_error.lock().unwrap().clone() {
+            self.jobs
+                .lock()
+                .unwrap()
+                .retain(|j| j.data.lock().unwrap().id != id);
+            bail!(error);
+        }
         self.launch(job);
         Ok(id)
     }
@@ -410,9 +461,9 @@ impl Manager {
         };
         check_running(job)?;
         job.data.lock().unwrap().status = Status::Connecting;
-        let url = job.data.lock().unwrap().url.clone();
+        let initial = job.data.lock().unwrap().clone();
         let probe = tokio::select! {
-            response = self.client.get(&url).header(header::RANGE, "bytes=0-0").header(header::ACCEPT_ENCODING, "identity").send() => response?,
+            response = download_request(&self.client, &initial).header(header::RANGE, "bytes=0-0").send() => response?,
             _ = stopped(job) => bail!("Transfer stopped"),
         };
         if probe.status() != StatusCode::RANGE_NOT_SATISFIABLE {
@@ -580,9 +631,7 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
     if d.ranged && offset == part.len() {
         return Ok(());
     }
-    let mut request = client
-        .get(&d.url)
-        .header(header::ACCEPT_ENCODING, "identity");
+    let mut request = download_request(client, &d);
     if d.ranged {
         request = request.header(
             header::RANGE,
@@ -684,6 +733,16 @@ fn ensure_identity(response: &reqwest::Response) -> Result<()> {
     Ok(())
 }
 
+fn download_request(client: &Client, download: &Download) -> reqwest::RequestBuilder {
+    let request = client
+        .get(&download.url)
+        .header(header::ACCEPT_ENCODING, "identity");
+    match &download.referrer {
+        Some(referrer) => request.header(header::REFERER, referrer),
+        None => request,
+    }
+}
+
 fn response_validator(response: &reqwest::Response) -> Option<String> {
     response
         .headers()
@@ -748,6 +807,10 @@ pub fn filename(url: &Url) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("download");
     let decoded = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+    sanitize_filename(&decoded)
+}
+
+fn sanitize_filename(decoded: &str) -> String {
     let mut name: String = decoded
         .chars()
         .map(|c| {

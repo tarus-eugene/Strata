@@ -31,7 +31,9 @@ enum View {
 #[derive(Clone, Copy)]
 enum Icon {
     Download,
-    Layers,
+    Minimize,
+    Maximize,
+    Restore,
     Play,
     Pause,
     Check,
@@ -58,6 +60,8 @@ pub struct Strata {
     error: Option<String>,
     focus: FocusHandle,
     compact: bool,
+    browser_registered: bool,
+    browser_notice: Option<String>,
     directory: PathBuf,
     connections: usize,
     rates: HashMap<u64, f64>,
@@ -68,6 +72,67 @@ pub struct Strata {
 }
 
 impl Strata {
+    fn titlebar(&self, window: &Window) -> Div {
+        let maximized = window.is_maximized();
+        div()
+            .h(px(44.))
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(rgb(BG))
+            .border_b_1()
+            .border_color(rgb(RULE))
+            .window_control_area(WindowControlArea::Drag)
+            .child(
+                div()
+                    .w(px(if self.compact { 188. } else { 212. }))
+                    .px(px(26.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        svg()
+                            .path("brand/mark.svg")
+                            .size(px(25.))
+                            .text_color(rgb(BLUE)),
+                    )
+                    .child(label("strata", 17., TEXT).font_weight(FontWeight::SEMIBOLD)),
+            )
+            .child(label("Download manager", 12., FAINT).flex_1())
+            .child(
+                window_control("window-minimize", Icon::Minimize, WindowControlArea::Min).on_click(
+                    |_, window, cx| {
+                        cx.stop_propagation();
+                        window.minimize_window();
+                    },
+                ),
+            )
+            .child(
+                window_control(
+                    "window-maximize",
+                    if maximized {
+                        Icon::Restore
+                    } else {
+                        Icon::Maximize
+                    },
+                    WindowControlArea::Max,
+                )
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    toggle_maximize(window);
+                }),
+            )
+            .child(
+                window_control("window-close", Icon::Close, WindowControlArea::Close).on_click(
+                    |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.quit();
+                    },
+                ),
+            )
+    }
+
     pub fn new(manager: Arc<Manager>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = manager.settings.lock().unwrap().clone();
         let url = cx.new(|cx| TextInput::new("https://example.com/file.zip", cx));
@@ -104,6 +169,8 @@ impl Strata {
             error: None,
             focus,
             compact: false,
+            browser_registered: strata::bridge::chrome_registered(),
+            browser_notice: None,
             directory: settings.directory,
             connections: settings.connections,
             rates: HashMap::new(),
@@ -116,7 +183,14 @@ impl Strata {
 
     fn refresh(&mut self) {
         let elapsed = self.sampled_at.elapsed().as_secs_f64();
+        let previous_id = self.downloads.last().map(|d| d.id);
         self.downloads = self.manager.snapshots();
+        if let Some(id) = self.downloads.last().map(|d| d.id)
+            && Some(id) != previous_id
+        {
+            self.selected = Some(id);
+            self.view = View::All;
+        }
         for d in &self.downloads {
             let old = self
                 .previous
@@ -289,16 +363,7 @@ impl Strata {
             .border_r_1()
             .border_color(rgb(RULE))
             .px(px(18.))
-            .child(
-                div()
-                    .h(px(88.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(8.))
-                    .child(icon(Icon::Layers, 27., TEXT))
-                    .child(label("strata", 25., TEXT).font_weight(FontWeight::SEMIBOLD)),
-            )
+            .child(div().h(px(28.)))
             .child(
                 label("Library", 12., FAINT)
                     .px(px(12.))
@@ -1022,6 +1087,20 @@ impl Strata {
                         .focusable().focus(|s| s.border_1().border_color(rgb(BLUE))).hover(|s| s.opacity(0.85)).child(n.to_string())
                         .on_click(cx.listener(move |this, _, _, cx| this.set_connections(n, cx)))
                 }))))
+            .child(div().p(px(22.)).rounded(px(12.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+                .child(label("Chrome companion", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label("Capture file downloads in Chrome and send them straight to Strata. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
+                .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in Chrome." }, 12., if self.browser_registered { BLUE } else { FAINT }))
+                .child(div().flex().gap(px(12.))
+                    .child(button("connect-chrome", if self.browser_registered { "Reconnect Chrome" } else { "Connect Chrome" }, Icon::Link, true).on_click(cx.listener(|this, _, _, cx| {
+                        match strata::bridge::register_chrome() {
+                            Ok(()) => { this.browser_registered = true; this.browser_notice = Some("Connected. Load the extension folder in chrome://extensions to finish setup.".into()); },
+                            Err(error) => this.browser_notice = Some(format!("Could not connect: {error:#}")),
+                        } cx.notify();
+                    })))
+                    .child(button("extension-folder", "Extension folder", Icon::Folder, false).on_click(|_, _, _| reveal(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extension")))))
+                .children(self.browser_notice.as_ref().map(|message| label(message, 12., MUTED)))
+                .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
             .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))))
     }
 }
@@ -1043,6 +1122,7 @@ impl Render for Strata {
             .line_height(px(20.))
             .track_focus(&self.focus)
             .flex()
+            .flex_col()
             .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
@@ -1069,30 +1149,38 @@ impl Render for Strata {
                     }
                 }
             }))
-            .child(self.sidebar(cx))
+            .child(self.titlebar(window))
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
+                    .min_h_0()
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .when(self.view == View::Settings, |d| {
-                        d.child(self.topbar(cx)).child(self.settings(cx))
-                    })
-                    .when(self.view != View::Settings, |d| {
-                        d.child(self.topbar(cx)).child(self.queue(window, cx))
-                    })
-                    .children(
-                        self.manager
-                            .persistence_error
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .map(|e| label(e, 12., RED).px(px(28.)).py(px(10.))),
-                    ),
+                    .child(self.sidebar(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(self.view == View::Settings, |d| {
+                                d.child(self.topbar(cx)).child(self.settings(cx))
+                            })
+                            .when(self.view != View::Settings, |d| {
+                                d.child(self.topbar(cx)).child(self.queue(window, cx))
+                            })
+                            .children(
+                                self.manager
+                                    .persistence_error
+                                    .lock()
+                                    .unwrap()
+                                    .clone()
+                                    .map(|e| label(e, 12., RED).px(px(28.)).py(px(10.))),
+                            ),
+                    )
+                    .when(self.view != View::Settings, |d| d.child(self.inspector(cx))),
             )
-            .when(self.view != View::Settings, |d| d.child(self.inspector(cx)))
     }
 }
 
@@ -1163,6 +1251,50 @@ fn icon_button(id: impl Into<SharedString>, glyph: Icon) -> Stateful<Div> {
         .focusable()
         .focus(|s| s.bg(rgb(RAISED)))
         .child(icon(glyph, 16., MUTED))
+}
+
+fn window_control(id: &'static str, glyph: Icon, area: WindowControlArea) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(46.))
+        .h(px(44.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .window_control_area(area)
+        .focusable()
+        .focus(|s| s.bg(rgb(RAISED)))
+        .hover(|s| {
+            s.bg(rgb(if area == WindowControlArea::Close {
+                0xb73d49
+            } else {
+                RAISED
+            }))
+        })
+        .child(icon(glyph, 14., TEXT))
+}
+
+fn toggle_maximize(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_RESTORE, ShowWindowAsync},
+    };
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(handle) = handle.as_raw()
+    {
+        // GPUI 0.2.2's zoom() only maximizes on Windows; explicitly restore the saved native placement.
+        unsafe {
+            let _ = ShowWindowAsync(
+                HWND(handle.hwnd.get() as *mut _),
+                if window.is_maximized() {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                },
+            );
+        }
+    }
 }
 
 fn progress(value: f32, color: u32) -> Div {
@@ -1243,10 +1375,11 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
                     vec![(7., 10.), (12., 15.), (17., 10.)],
                     vec![(4., 16.), (4., 21.), (20., 21.), (20., 16.)],
                 ],
-                Icon::Layers => vec![
-                    vec![(3., 7.), (12., 2.), (21., 7.), (12., 12.), (3., 7.)],
-                    vec![(3., 12.), (12., 17.), (21., 12.)],
-                    vec![(3., 17.), (12., 22.), (21., 17.)],
+                Icon::Minimize => vec![vec![(4., 12.), (20., 12.)]],
+                Icon::Maximize => vec![vec![(5., 5.), (19., 5.), (19., 19.), (5., 19.), (5., 5.)]],
+                Icon::Restore => vec![
+                    vec![(8., 5.), (8., 3.), (21., 3.), (21., 16.), (19., 16.)],
+                    vec![(3., 8.), (16., 8.), (16., 21.), (3., 21.), (3., 8.)],
                 ],
                 Icon::Play => vec![vec![(8., 4.), (20., 12.), (8., 20.), (8., 4.)]],
                 Icon::Pause => vec![vec![(8., 5.), (8., 19.)], vec![(16., 5.), (16., 19.)]],
