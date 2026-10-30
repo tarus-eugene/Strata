@@ -108,7 +108,13 @@ pub fn write_message(writer: &mut impl Write, reply: &Reply) -> Result<()> {
 
 fn dispatch(manager: &Arc<Manager>, request: Request) -> Reply {
     let result = match request {
-        Request::Ping | Request::Open => Ok(None),
+        Request::Ping => Ok(None),
+        Request::Open => {
+            manager
+                .show_requested
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
         Request::Download {
             url,
             filename,
@@ -198,9 +204,9 @@ mod platform {
     fn pipe_name(history: &Path) -> Result<(String, String)> {
         let sid = current_sid()?;
         let mut hash = DefaultHasher::new();
-        let normalized = history
-            .parent()
-            .context("Missing history folder")?
+        let parent = history.parent().context("Missing history folder")?;
+        std::fs::create_dir_all(parent)?;
+        let normalized = parent
             .canonicalize()?
             .join(history.file_name().context("Missing history filename")?);
         normalized.to_string_lossy().to_lowercase().hash(&mut hash);
@@ -365,6 +371,22 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn first_connection_prepares_a_new_data_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let history = directory.path().join("new-user-data/history.json");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(send(&Request::Ping, &history, false))
+            .unwrap_err();
+        assert!(error.to_string().contains("Open Strata"));
+        assert!(history.parent().unwrap().is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn named_pipe_accepts_only_valid_download_requests() {
         let dir = tempfile::tempdir().unwrap();
         let history = dir.path().join("history.json");
@@ -377,6 +399,13 @@ mod tests {
             .unwrap();
         let reply = rt.block_on(send(&Request::Ping, &history, false)).unwrap();
         assert!(reply.ok);
+        let reply = rt.block_on(send(&Request::Open, &history, false)).unwrap();
+        assert!(reply.ok);
+        assert!(
+            manager
+                .show_requested
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        );
         let alternate = std::path::PathBuf::from(history.to_string_lossy().replace('\\', "/"));
         assert!(
             rt.block_on(send(&Request::Ping, &alternate, false))

@@ -1,8 +1,10 @@
 use crate::input::TextInput;
+use crate::tray::Tray;
 use gpui::{prelude::*, *};
 use std::{
     collections::HashMap,
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -51,6 +53,8 @@ enum Icon {
 
 pub struct Strata {
     manager: Arc<Manager>,
+    tray: Option<Rc<Tray>>,
+    tray_error: Option<String>,
     downloads: Vec<Download>,
     view: View,
     selected: Option<u64>,
@@ -72,7 +76,7 @@ pub struct Strata {
 }
 
 impl Strata {
-    fn titlebar(&self, window: &Window) -> Div {
+    fn titlebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let maximized = window.is_maximized();
         div()
             .h(px(44.))
@@ -125,15 +129,25 @@ impl Strata {
             )
             .child(
                 window_control("window-close", Icon::Close, WindowControlArea::Close).on_click(
-                    |_, _, cx| {
+                    cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
-                        cx.quit();
-                    },
+                        if let Some(tray) = &this.tray {
+                            tray.hide();
+                        } else {
+                            cx.quit();
+                        }
+                    }),
                 ),
             )
     }
 
-    pub fn new(manager: Arc<Manager>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        manager: Arc<Manager>,
+        tray: Option<Rc<Tray>>,
+        tray_error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = manager.settings.lock().unwrap().clone();
         let url = cx.new(|cx| TextInput::new("https://example.com/file.zip", cx));
         let search = cx.new(|cx| TextInput::new("Search downloads", cx));
@@ -144,9 +158,26 @@ impl Strata {
                     .timer(Duration::from_millis(400))
                     .await;
                 if this
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
+                        if this.tray.as_ref().is_some_and(|tray| tray.quitting()) {
+                            cx.quit();
+                            return;
+                        }
+                        if this
+                            .manager
+                            .show_requested
+                            .swap(false, std::sync::atomic::Ordering::SeqCst)
+                        {
+                            if let Some(tray) = &this.tray {
+                                tray.show();
+                            } else {
+                                window.activate_window();
+                            }
+                        }
                         this.refresh();
-                        cx.notify();
+                        if !this.tray.as_ref().is_some_and(|tray| tray.is_hidden()) {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -160,6 +191,8 @@ impl Strata {
         let selected = downloads.last().map(|d| d.id);
         Self {
             manager,
+            tray,
+            tray_error,
             downloads,
             view: View::All,
             selected,
@@ -1101,7 +1134,9 @@ impl Strata {
                     .child(button("extension-folder", "Extension folder", Icon::Folder, false).on_click(|_, _, _| reveal(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extension")))))
                 .children(self.browser_notice.as_ref().map(|message| label(message, 12., MUTED)))
                 .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
-            .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))))
+            .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))
+            .when(self.tray.is_some(), |view| view.child(label("Closing the window keeps downloads running in the system tray. Right-click the tray icon and choose Quit Strata to exit.", 12., FAINT)))
+        ))
     }
 }
 
@@ -1149,7 +1184,7 @@ impl Render for Strata {
                     }
                 }
             }))
-            .child(self.titlebar(window))
+            .child(self.titlebar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -1177,6 +1212,11 @@ impl Render for Strata {
                                     .unwrap()
                                     .clone()
                                     .map(|e| label(e, 12., RED).px(px(28.)).py(px(10.))),
+                            )
+                            .children(
+                                self.tray_error.as_ref().map(|message| {
+                                    label(message, 12., AMBER).px(px(28.)).py(px(10.))
+                                }),
                             ),
                     )
                     .when(self.view != View::Settings, |d| d.child(self.inspector(cx))),

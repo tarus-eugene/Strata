@@ -3,9 +3,11 @@
 mod brand;
 mod input;
 mod text;
+mod tray;
 mod ui;
 
 use gpui::{prelude::*, *};
+use std::rc::Rc;
 use std::sync::Arc;
 use strata::engine::{Manager, history_path};
 
@@ -19,6 +21,19 @@ fn main() -> anyhow::Result<()> {
         .truncate(false)
         .open(history.with_extension("lock"))?;
     if lock.try_lock().is_err() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        if runtime
+            .block_on(strata::bridge::send(
+                &strata::bridge::Request::Open,
+                &history,
+                false,
+            ))
+            .is_ok_and(|reply| reply.ok)
+        {
+            return Ok(());
+        }
         if std::env::args().any(|arg| arg == "--from-browser") {
             return Ok(());
         }
@@ -69,10 +84,27 @@ fn main() -> anyhow::Result<()> {
                 },
                 move |window, cx| {
                     window.set_rem_size(px(16.));
-                    let app = cx.new(|cx| ui::Strata::new(Arc::clone(&manager), window, cx));
-                    window.on_window_should_close(cx, |_, cx| {
-                        cx.quit();
-                        true
+                    let (tray, tray_error) = match tray::Tray::new(window) {
+                        Ok(tray) => (Some(Rc::new(tray)), None),
+                        Err(error) => (None, Some(format!("System tray unavailable. Closing the window will quit Strata. {error:#}"))),
+                    };
+                    if let Some(tray) = tray.clone() {
+                        cx.on_app_quit(move |_| {
+                            tray.remove_icon();
+                            async {}
+                        }).detach();
+                    }
+                    let app = cx.new(|cx| {
+                        ui::Strata::new(Arc::clone(&manager), tray.clone(), tray_error, window, cx)
+                    });
+                    window.on_window_should_close(cx, move |_, cx| {
+                        if let Some(tray) = &tray && !tray.quitting() {
+                            tray.hide();
+                            false
+                        } else {
+                            cx.quit();
+                            true
+                        }
                     });
                     app
                 },

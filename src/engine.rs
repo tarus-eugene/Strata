@@ -162,6 +162,7 @@ pub struct Manager {
     save_lock: Mutex<()>,
     pub persistence_error: Mutex<Option<String>>,
     pub browser_error: Mutex<Option<String>>,
+    pub show_requested: AtomicBool,
 }
 
 impl Manager {
@@ -214,6 +215,7 @@ impl Manager {
             save_lock: Mutex::new(()),
             persistence_error: Mutex::new(None),
             browser_error: Mutex::new(None),
+            show_requested: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&manager);
         manager.runtime.spawn(async move {
