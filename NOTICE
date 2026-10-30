@@ -1,0 +1,5 @@
+The text input implementation in src/input.rs is adapted from
+GPUI 0.2.2 examples/input.rs, copyright Zed Industries and contributors,
+licensed under the Apache License, Version 2.0.
+https://github.com/zed-industries/zed
+https://www.apache.org/licenses/LICENSE-2.0
