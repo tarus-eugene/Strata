@@ -1,0 +1,7 @@
+/target/
+/.tools/
+/.taste-skill/
+/.impeccable/
+/test-output/
+*.log
+*.pdb
