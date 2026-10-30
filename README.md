@@ -33,21 +33,35 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 
 The tray icon is removed on quit and re-added after Windows Explorer restarts. If the notification area is unavailable, a visible message explains that closing will quit instead of hiding the only reachable window.
 
-## Chrome companion
+## Windows installer
 
-Connect the app once using **Settings → Chrome companion → Connect Chrome**, or run `.\install-browser.ps1`. Then load the extension into your Chrome profile:
+Run `dist\Strata-Setup-0.1.0-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, local browser bridge, Visual C++ runtime DLLs, browser extension, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
-1. Open `chrome://extensions` and turn on **Developer mode**.
-2. Choose **Load unpacked** and select this project's `extension` folder.
+The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
+
+To rebuild the installer, install [Inno Setup](https://jrsoftware.org/isdl.php) 6.3 or later and the Visual Studio C++ build tools, then run:
+
+```powershell
+.\scripts\package-installer.ps1
+```
+
+This builds both release executables and writes a versioned setup EXE, SHA-256 file, and `strata-browser-extension.zip` to `dist`. Use `-SkipBuild` to package an existing release build, `-CompilerPath` for a custom `ISCC.exe`, or `-RuntimeDirectory` for the x64 `Microsoft.VC*.CRT` redistributable folder. Build staging stays under the ignored `.tools` directory. No Rust toolchain is needed on the computer where Strata is installed. The setup EXE is currently unsigned.
+
+## Chromium browser companion
+
+The same extension supports Windows Chromium browsers with Manifest V3, downloads, and native messaging enabled: Chrome, Edge, Brave, Vivaldi, Opera / Opera GX, Chromium, and compatible forks. Connect once using the installer or **Settings → Browser companion → Connect browsers**. From a source checkout, run `.\install-browser.ps1`.
+
+1. Open your browser's extensions page (`chrome://extensions`, `edge://extensions`, `brave://extensions`, `vivaldi://extensions`, or `opera://extensions`) and turn on **Developer mode**.
+2. Choose **Load unpacked** and select the `extension` folder inside your Strata installation or source checkout. **Settings → Extension folder** opens the correct location.
 3. Pin **Strata — Download companion**. Open its popup to check the app connection and turn capture on or off.
 
-On another installation, build both executables with `.\run.ps1 build`, then use **Settings → Chrome companion → Connect Chrome**, or run:
+When building from source, build both executables with `.\run.ps1 build`, then use **Settings → Browser companion → Connect browsers**, or run:
 
 ```powershell
 .\install-browser.ps1
 ```
 
-Keep `strata.exe` and `strata-bridge.exe` in the same folder. If you move the executables, reconnect the bridge. For a release build, run `.\install-browser.ps1 -AppDirectory .\target\release`. Unregister it with `.\install-browser.ps1 -Uninstall`; this retains your downloads and history.
+Keep `strata.exe` and `strata-bridge.exe` in the same folder. If you move the executables, reconnect the bridge. For a release build, run `.\install-browser.ps1 -AppDirectory .\target\release`. Unregister it with `.\install-browser.ps1 -Uninstall`; this retains your downloads and history. The installer removes its own registration during uninstall and preserves a registration that has since been pointed to a different Strata installation.
 
 With capture enabled, the extension pauses eligible HTTP/HTTPS file downloads, sends the URL, browser-provided filename, and referrer to Strata, and cancels Chrome's paused copy **only after the app confirms the download was saved to its queue**. If the native host is unavailable or the app refuses the request, Chrome resumes its own download. A suspended extension worker recovers its pending handoffs on restart.
 
@@ -56,6 +70,8 @@ You can also right-click a file link and choose **Download with Strata**, or pas
 The extension uses Manifest V3 with only `downloads`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in Strata.
 
 The bridge uses Chrome's [native messaging protocol](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and a local named pipe restricted to your Windows user and SYSTEM. The committed extension public key keeps its ID stable: `eaccbjfepcpidchboonodedpepgboolc`. Only that extension origin is allowed; messages are length-bounded and accept fixed actions, never commands.
+
+The bridge is registered in the per-user Chrome, Chromium, and Edge native messaging locations. [Edge documents its own location and the Chromium/Chrome fallbacks](https://learn.microsoft.com/en-us/microsoft-edge/extensions-chromium/developer-guide/native-messaging); [Opera documents the Chrome registration location](https://help.opera.com/en/extensions/message-passing/). Other compatible Chromium forks use their standard native messaging lookup. Fork-specific restrictions and managed browser policies can prevent connection; every fork has not been tested individually. This desktop bridge targets Windows, not Android or iOS.
 
 ## Logo
 
@@ -96,6 +112,8 @@ The local HTTP test server verifies simultaneous range requests and byte-for-byt
 
 Tray checks cover mouse and keyboard callback routing. The ignored `native_tray_hides_restores_and_cleans_up` test requires interactive Windows Explorer; it creates its own window and verifies native tray creation, restore, hide without destroying the window, and cleanup. It was also run successfully on Windows.
 
-End-to-end verification used an isolated Chromium profile: a real browser download was handed through the native host to the app, Chrome's copy was canceled after acceptance, and the app's 4 MiB file matched every source byte. With capture off, the next file completed in Chromium without creating an app transfer. The popup rendered its live connected state without script errors.
+End-to-end verification used isolated Chromium and Brave profiles: a real browser download was handed through the native host to the app, the browser's copy was canceled after acceptance, and the app's 4 MiB file matched every source byte. With capture off, the next file completed in the browser without creating an app transfer. The popup rendered its live connected state without script errors. Brave was checked against the optimized release app.
+
+`scripts/test-installer.ps1` exercises the real setup EXE in a directory with spaces: running-app protection, install, repeat-install upgrade, runtime and extension payloads, Start menu shortcut, native host registrations, and uninstall. It checks that unrelated data remains and a bridge registration belonging to a different installation survives. Use a Windows account without an existing installed Strata or Strata Start menu shortcut; quit any running copy first. The test snapshots and restores existing native host registrations and leaves diagnostic logs under `.tools/installer-test`.
 
 The editable text input is adapted from GPUI's Apache-2.0 example; see `NOTICE` and `LICENSE-APACHE`.

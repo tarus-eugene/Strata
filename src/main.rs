@@ -12,6 +12,12 @@ use std::sync::Arc;
 use strata::engine::{Manager, history_path};
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--register-browser-host") {
+        return strata::bridge::register_browsers();
+    }
+    if std::env::args().any(|arg| arg == "--unregister-browser-host") {
+        return strata::bridge::unregister_browsers();
+    }
     let history = history_path();
     std::fs::create_dir_all(history.parent().unwrap())?;
     let lock = std::fs::OpenOptions::new()
@@ -43,6 +49,14 @@ fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    // Keep the installer from replacing a running app, including its hidden tray window.
+    let _installer_mutex = unsafe {
+        windows::Win32::System::Threading::CreateMutexW(
+            None,
+            false,
+            windows::core::w!("Local\\Strata.DownloadManager"),
+        )?
+    };
     let manager = match Manager::new(history.clone()) {
         Ok(manager) => manager,
         Err(error) => {

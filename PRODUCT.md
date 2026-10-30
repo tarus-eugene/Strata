@@ -16,6 +16,8 @@ Split supported HTTP downloads into concurrent parts. Safely fall back when rang
 
 The user additionally requested a custom in-app title bar, a logo, and a Chrome extension that captures file downloads and funnels them to the desktop app. The implementation uses a per-user local native-messaging bridge and preserves Chrome downloads when handoff fails.
 
+The browser companion now targets compatible Windows Chromium browsers, including Chrome, Edge, Brave, Vivaldi, Opera / Opera GX, and Chromium. A per-user Windows installer bundles the release app, bridge, extension, runtime DLLs, and shortcuts. Loading the extension remains an explicit action in each browser profile. Upgrades require quitting Strata through its tray menu; uninstall preserves files, partial transfers, settings, and history.
+
 The user requested close-to-tray behavior: closing the main window keeps the app and transfers running in the background. The tray icon restores it and provides an explicit Quit action.
 
 ## Brand Commitments
