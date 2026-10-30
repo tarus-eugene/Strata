@@ -20,6 +20,7 @@ $destination = Join-Path $testRoot '101 Downloader with spaces'
 $group = '101 Downloader'
 $shortcut = Join-Path $env:APPDATA "Microsoft/Windows/Start Menu/Programs/$group/101 Downloader.lnk"
 if (Test-Path -LiteralPath $shortcut) { throw 'A 101 Downloader shortcut already exists. Run this test in a clean Windows account.' }
+if (Test-Path -LiteralPath (Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Strata')) { throw 'Legacy Strata shortcuts exist. Run this test in a clean Windows account.' }
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $retained = Join-Path $testRoot 'history-to-retain.json'
 [IO.File]::WriteAllText($retained, '{"sentinel":"keep user data"}')
