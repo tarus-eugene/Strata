@@ -6,11 +6,15 @@ description = "A native parallel download manager built with GPUI"
 license = "MIT"
 default-run = "strata"
 
+[features]
+default = ["torrent-native"]
+torrent-native = ["dep:librqbit"]
+
 [dependencies]
 anyhow = "1"
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time", "sync", "macros", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "socks"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time", "sync", "macros", "net", "process"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,9 +23,16 @@ percent-encoding = "2"
 tempfile = "3"
 unicode-segmentation = "1"
 raw-window-handle = "0.6"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+md-5 = "0.10"
+roxmltree = "0.20"
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "3"
+librqbit = { version = "9", optional = true, default-features = false, features = ["rust-tls"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 windows-registry = "0.5"
 
 [build-dependencies]

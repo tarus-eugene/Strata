@@ -1,3 +1,4 @@
+use crate::protocol::{Protocol, Source, TransferOptions};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
@@ -18,6 +19,14 @@ use tokio::{
     task::JoinSet,
 };
 use url::Url;
+
+mod ftp;
+mod metalink;
+mod sftp;
+mod tools;
+#[cfg(feature = "torrent-native")]
+mod torrent;
+mod video;
 
 const RUN: u8 = 0;
 const PAUSE: u8 = 1;
@@ -96,6 +105,10 @@ pub struct Download {
     pub created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
+    #[serde(default)]
+    pub protocol: Protocol,
+    #[serde(default)]
+    pub options: TransferOptions,
 }
 
 impl Download {
@@ -116,7 +129,11 @@ impl Download {
     pub fn host(&self) -> String {
         Url::parse(&self.url)
             .ok()
-            .and_then(|u| u.host_str().map(str::to_owned))
+            .and_then(|u| match u.scheme() {
+                "file" => Some("Local descriptor".into()),
+                "magnet" => Some("BitTorrent network".into()),
+                _ => u.host_str().map(str::to_owned),
+            })
             .unwrap_or_default()
     }
 }
@@ -125,6 +142,8 @@ impl Download {
 pub struct Settings {
     pub directory: PathBuf,
     pub connections: usize,
+    #[serde(default)]
+    pub transport: TransferOptions,
 }
 
 impl Default for Settings {
@@ -136,13 +155,14 @@ impl Default for Settings {
         Self {
             directory: home.join("Downloads"),
             connections: 8,
+            transport: TransferOptions::default(),
         }
     }
 }
 
 struct Job {
     data: Mutex<Download>,
-    control: AtomicU8,
+    control: Arc<AtomicU8>,
     running: AtomicBool,
 }
 
@@ -163,6 +183,8 @@ pub struct Manager {
     pub persistence_error: Mutex<Option<String>>,
     pub browser_error: Mutex<Option<String>>,
     pub show_requested: AtomicBool,
+    #[cfg(feature = "torrent-native")]
+    torrent_session: tokio::sync::OnceCell<Arc<librqbit::Session>>,
 }
 
 impl Manager {
@@ -187,7 +209,7 @@ impl Manager {
                 }
                 Arc::new(Job {
                     data: Mutex::new(data),
-                    control: AtomicU8::new(PAUSE),
+                    control: Arc::new(AtomicU8::new(PAUSE)),
                     running: AtomicBool::new(false),
                 })
             })
@@ -216,6 +238,8 @@ impl Manager {
             persistence_error: Mutex::new(None),
             browser_error: Mutex::new(None),
             show_requested: AtomicBool::new(false),
+            #[cfg(feature = "torrent-native")]
+            torrent_session: tokio::sync::OnceCell::new(),
         });
         let weak = Arc::downgrade(&manager);
         manager.runtime.spawn(async move {
@@ -245,7 +269,17 @@ impl Manager {
         directory: PathBuf,
         connections: usize,
     ) -> Result<u64> {
-        self.add_with_metadata(input, directory, connections, None, None)
+        self.add_with_options(input, directory, connections, TransferOptions::default())
+    }
+
+    pub fn add_with_options(
+        self: &Arc<Self>,
+        input: &str,
+        directory: PathBuf,
+        connections: usize,
+        options: TransferOptions,
+    ) -> Result<u64> {
+        self.add_with_metadata(input, directory, connections, None, None, options)
     }
 
     pub(crate) fn runtime_handle(&self) -> Handle {
@@ -258,6 +292,14 @@ impl Manager {
         name: Option<&str>,
         referrer: Option<&str>,
     ) -> Result<u64> {
+        let browser_url = Url::parse(input)?;
+        ensure!(
+            matches!(
+                browser_url.scheme(),
+                "http" | "https" | "ftp" | "sftp" | "webdav" | "webdavs" | "magnet"
+            ),
+            "Browsers may send only remote download links, never local file paths"
+        );
         let settings = self.settings.lock().unwrap().clone();
         let referrer = referrer
             .filter(|s| !s.is_empty())
@@ -273,6 +315,7 @@ impl Manager {
             settings.connections,
             name,
             referrer,
+            TransferOptions::default(),
         )
     }
 
@@ -283,12 +326,60 @@ impl Manager {
         connections: usize,
         suggested_name: Option<String>,
         referrer: Option<String>,
+        options: TransferOptions,
     ) -> Result<u64> {
-        let url = validate_url(input)?;
+        let defaults = self.settings.lock().unwrap().transport.clone();
+        let explicit_proxy = options.proxy.is_some();
+        let mut options = options.with_defaults(&defaults);
+        if options.protocol.is_none()
+            && let Some(name) = &suggested_name
+        {
+            options.protocol = match Path::new(name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("torrent") => Some(Protocol::Torrent),
+                Some("meta4" | "metalink") => Some(Protocol::Metalink),
+                _ => None,
+            };
+        }
+        let source = Source::parse(input, options)?;
+        ensure!(
+            !explicit_proxy
+                || !matches!(
+                    source.protocol,
+                    Protocol::Ftp | Protocol::Sftp | Protocol::Torrent
+                ),
+            "This protocol does not support an explicit proxy. Proxy routing is available for HTTP(S), WebDAV, Metalink HTTP mirrors, and video transfers."
+        );
+        let url = &source.url;
+        let directory = std::path::absolute(directory)?;
         ensure!(directory.is_dir(), "Choose an existing download folder.");
         let mut jobs = self.jobs.lock().unwrap();
         let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
-        let base = suggested_name.unwrap_or_else(|| filename(&url));
+        let base = if source.protocol.folder_output() {
+            let name = if let Some(name) = &suggested_name {
+                name.clone()
+            } else if url.scheme() == "magnet" {
+                url.query_pairs()
+                    .find(|(k, _)| k == "dn")
+                    .map(|(_, v)| sanitize_filename(&v))
+                    .unwrap_or_else(|| "Torrent".into())
+            } else {
+                filename(url)
+            };
+            format!(
+                "{}-files",
+                Path::new(&name)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )
+        } else {
+            suggested_name.unwrap_or_else(|| filename(url))
+        };
         let name = available_name(
             &directory,
             &base,
@@ -313,8 +404,10 @@ impl Manager {
                 connections: connections.clamp(1, 16),
                 created: id / 1_000_000,
                 referrer,
+                protocol: source.protocol,
+                options: source.options,
             }),
-            control: AtomicU8::new(RUN),
+            control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
         });
         jobs.push(job.clone());
@@ -463,9 +556,39 @@ impl Manager {
         };
         check_running(job)?;
         job.data.lock().unwrap().status = Status::Connecting;
+        let protocol = job.data.lock().unwrap().protocol;
+        match protocol {
+            Protocol::Http | Protocol::WebDav => self.execute_http(job).await,
+            Protocol::Ftp => self.execute_ftp(job).await,
+            Protocol::Sftp => self.execute_sftp(job).await,
+            Protocol::Metalink => self.execute_metalink(job).await,
+            Protocol::Video => self.execute_video(job).await,
+            #[cfg(feature = "torrent-native")]
+            Protocol::Torrent => self.execute_torrent(job).await,
+            #[cfg(not(feature = "torrent-native"))]
+            Protocol::Torrent => bail!("This build needs the torrent-native feature"),
+        }
+    }
+
+    fn client_for(&self, options: &TransferOptions) -> Result<Client> {
+        if let Some(proxy) = &options.proxy {
+            Ok(Client::builder()
+                .user_agent("Strata/0.1")
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .proxy(reqwest::Proxy::all(proxy.connection_url()?)?)
+                .build()?)
+        } else {
+            Ok(self.client.clone())
+        }
+    }
+
+    async fn execute_http(&self, job: &Arc<Job>) -> Result<()> {
         let initial = job.data.lock().unwrap().clone();
+        let client = self.client_for(&initial.options)?;
         let probe = tokio::select! {
-            response = download_request(&self.client, &initial).header(header::RANGE, "bytes=0-0").send() => response?,
+            response = download_request(&client, &initial)?.header(header::RANGE, "bytes=0-0").send() => response?,
             _ = stopped(job) => bail!("Transfer stopped"),
         };
         if probe.status() != StatusCode::RANGE_NOT_SATISFIABLE {
@@ -540,7 +663,7 @@ impl Manager {
         let mut workers = JoinSet::new();
         for index in 0..part_count {
             let job = job.clone();
-            let client = self.client.clone();
+            let client = client.clone();
             workers.spawn(async move { download_part(client, job, index).await });
         }
         let mut failure = None;
@@ -633,7 +756,7 @@ async fn transfer_part(client: &Client, job: &Arc<Job>, index: usize) -> Result<
     if d.ranged && offset == part.len() {
         return Ok(());
     }
-    let mut request = download_request(client, &d);
+    let mut request = download_request(client, &d)?;
     if d.ranged {
         request = request.header(
             header::RANGE,
@@ -735,14 +858,25 @@ fn ensure_identity(response: &reqwest::Response) -> Result<()> {
     Ok(())
 }
 
-fn download_request(client: &Client, download: &Download) -> reqwest::RequestBuilder {
-    let request = client
+fn download_request(client: &Client, download: &Download) -> Result<reqwest::RequestBuilder> {
+    let mut request = client
         .get(&download.url)
         .header(header::ACCEPT_ENCODING, "identity");
-    match &download.referrer {
+    if let Some(user) = &download.options.username {
+        request = request.basic_auth(
+            user,
+            download
+                .options
+                .password
+                .as_ref()
+                .map(|s| s.expose())
+                .transpose()?,
+        );
+    }
+    Ok(match &download.referrer {
         Some(referrer) => request.header(header::REFERER, referrer),
         None => request,
-    }
+    })
 }
 
 fn response_validator(response: &reqwest::Response) -> Option<String> {

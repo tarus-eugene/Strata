@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureDownload, eligible, recoverPending } from './background.js';
+import { captureDownload, eligible, recoverPending, remoteLink } from './background.js';
+
+test('context menu accepts remote protocols while refusing local files and executable schemes', () => {
+  for (const url of ['https://host/a', 'ftp://host/a', 'sftp://user@host/a', 'webdav://host/a', 'magnet:?xt=urn:btih:abc']) assert.equal(remoteLink(url), true);
+  for (const url of ['file:///C:/private.torrent', 'javascript:alert(1)', 'data:text/plain,secret', 'not a URL']) assert.equal(remoteLink(url), false);
+});
 
 const item = { id: 7, url: 'https://example.com/file.bin', filename: 'C:\\Downloads\\file.bin',
   state: 'in_progress', danger: 'safe', paused: false, referrer: 'https://example.com/files', startTime: '2026-10-30T10:00:00.000Z' };

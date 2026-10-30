@@ -18,6 +18,11 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--unregister-browser-host") {
         return strata::bridge::unregister_browsers();
     }
+    if std::env::args().len() > 1 && !std::env::args().any(|arg| arg == "--from-browser") {
+        use clap::Parser;
+        strata::cli::enqueue(strata::cli::Cli::parse())?;
+        return Ok(());
+    }
     let history = history_path();
     std::fs::create_dir_all(history.parent().unwrap())?;
     let lock = std::fs::OpenOptions::new()

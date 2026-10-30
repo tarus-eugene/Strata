@@ -60,6 +60,10 @@ pub struct Strata {
     selected: Option<u64>,
     url: Entity<TextInput>,
     search: Entity<TextInput>,
+    proxy: Entity<TextInput>,
+    identity: Entity<TextInput>,
+    known_hosts: Entity<TextInput>,
+    transport_notice: Option<String>,
     adding: bool,
     error: Option<String>,
     focus: FocusHandle,
@@ -149,8 +153,45 @@ impl Strata {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = manager.settings.lock().unwrap().clone();
-        let url = cx.new(|cx| TextInput::new("https://example.com/file.zip", cx));
+        let url = cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", cx));
         let search = cx.new(|cx| TextInput::new("Search downloads", cx));
+        let proxy =
+            cx.new(|cx| TextInput::new("http://, https:// or socks5:// proxy (optional)", cx));
+        let identity = cx.new(|cx| TextInput::new("Automatic: ~/.ssh/id_ed25519 or id_rsa", cx));
+        let known_hosts = cx.new(|cx| TextInput::new("Default: ~/.ssh/known_hosts", cx));
+        proxy.update(cx, |input, cx| {
+            input.set_value(
+                settings
+                    .transport
+                    .proxy
+                    .as_ref()
+                    .map(|p| p.url.as_str())
+                    .unwrap_or(""),
+                cx,
+            )
+        });
+        identity.update(cx, |input, cx| {
+            input.set_value(
+                &settings
+                    .transport
+                    .identity
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        known_hosts.update(cx, |input, cx| {
+            input.set_value(
+                &settings
+                    .transport
+                    .known_hosts
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
         let observer = cx.observe(&search, |_, _, cx| cx.notify());
         let ticker = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -198,6 +239,10 @@ impl Strata {
             selected,
             url,
             search,
+            proxy,
+            identity,
+            known_hosts,
+            transport_notice: None,
             adding: false,
             error: None,
             focus,
@@ -272,7 +317,7 @@ impl Strata {
         self.adding = true;
         self.error = None;
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text())
-            && strata::engine::validate_url(&text).is_ok()
+            && strata::protocol::Source::parse(&text, Default::default()).is_ok()
         {
             self.url
                 .update(cx, |input, cx| input.set_value(text.trim(), cx));
@@ -309,6 +354,73 @@ impl Strata {
         self.manager.settings.lock().unwrap().connections = n;
         self.manager.persist();
         cx.notify();
+    }
+
+    fn save_transport(&mut self, cx: &mut Context<Self>) {
+        let result = (|| -> anyhow::Result<()> {
+            let value = self.proxy.read(cx).value().trim();
+            let old = self.manager.settings.lock().unwrap().transport.clone();
+            let proxy = if value.is_empty() {
+                None
+            } else if old.proxy.as_ref().is_some_and(|p| p.url == value) {
+                old.proxy
+            } else {
+                Some(strata::protocol::Proxy::parse(value)?)
+            };
+            let path = |input: &Entity<TextInput>| -> anyhow::Result<Option<PathBuf>> {
+                let value = input.read(cx).value().trim();
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                let path = std::path::absolute(value)?;
+                anyhow::ensure!(path.is_file(), "Choose an existing SSH configuration file");
+                Ok(Some(path))
+            };
+            let options = strata::protocol::TransferOptions {
+                proxy,
+                identity: path(&self.identity)?,
+                known_hosts: path(&self.known_hosts)?,
+                ..Default::default()
+            };
+            self.proxy.update(cx, |input, cx| {
+                input.set_value(
+                    options.proxy.as_ref().map(|p| p.url.as_str()).unwrap_or(""),
+                    cx,
+                )
+            });
+            self.manager.settings.lock().unwrap().transport = options;
+            self.manager.persist();
+            if let Some(error) = self.manager.persistence_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
+            Ok(())
+        })();
+        self.transport_notice = Some(match result {
+            Ok(()) => "Saved. New transfers use these settings.".into(),
+            Err(error) => format!("{error:#}"),
+        });
+        cx.notify();
+    }
+
+    fn choose_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a torrent or Metalink descriptor".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await
+                && let Some(path) = paths.first()
+            {
+                let path = path.display().to_string();
+                let _ = this.update(cx, |this, cx| {
+                    this.url.update(cx, |input, cx| input.set_value(&path, cx));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn filtered(&self, cx: &App) -> Vec<Download> {
@@ -823,6 +935,15 @@ impl Strata {
             )
             .children(self.error.as_ref().map(|e| label(e.clone(), 12., RED)))
             .child(
+                button(
+                    "choose-descriptor",
+                    "Open torrent / Metalink file",
+                    Icon::Folder,
+                    false,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.choose_source(window, cx))),
+            )
+            .child(
                 div()
                     .flex()
                     .items_center()
@@ -1020,6 +1141,7 @@ impl Strata {
                                 .child(label(error, 12., RED).line_height(px(20.)))
                         }))
                         .child(div().h(px(1.)).bg(rgb(RULE)).my(px(4.)))
+                        .child(detail_line("Protocol", d.protocol.label()))
                         .child(detail_line("Source", &d.host()))
                         .child(detail_line("Destination", &d.path().display().to_string()))
                         .child(
@@ -1045,14 +1167,24 @@ impl Strata {
                         )
                         .when(d.status == Status::Complete, |panel| {
                             panel.child(
-                                button("open-file", "Open file", Icon::Arrow, true).on_click(
-                                    cx.listener(move |this, _, _, _| {
+                                button(
+                                    "open-file",
+                                    if d.protocol.folder_output() {
+                                        "Open download folder"
+                                    } else {
+                                        "Open file"
+                                    },
+                                    Icon::Arrow,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, _| {
                                         if let Some(d) = this.downloads.iter().find(|d| d.id == id)
                                         {
                                             reveal(&d.path());
                                         }
-                                    }),
-                                ),
+                                    },
+                                )),
                             )
                         })
                         .when(
@@ -1106,6 +1238,15 @@ impl Strata {
         div().flex_1().min_h_0().min_w_0().child(div().id("settings-scroll").size_full().overflow_y_scroll().child(div().p(px(32.)).flex().flex_col().gap(px(24.))
             .child(label("Settings", 24., TEXT).font_weight(FontWeight::SEMIBOLD))
             .child(label("A few good defaults. The rest is automatic.", 14., MUTED))
+            .child(div().p(px(22.)).rounded(px(12.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+                .child(label("Connections & authentication", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label("Proxy settings apply to HTTP, HTTPS, WebDAV, Metalink HTTP mirrors, and video transfers. FTP, SFTP, and torrent peers use direct connections. URL passwords are protected by Windows.", 13., MUTED).max_w(px(620.)))
+                .child(transport_input("HTTP / HTTPS / SOCKS5 proxy", self.proxy.clone()))
+                .child(transport_input("SFTP private key (optional)", self.identity.clone()))
+                .child(transport_input("SFTP known_hosts file (optional)", self.known_hosts.clone()))
+                .child(label("SFTP refuses unknown or changed host keys. Verify the host with OpenSSH first. Encrypted keys can use strata-cli --key-passphrase-stdin.", 12., FAINT).max_w(px(620.)))
+                .child(button("save-transport", "Save connection settings", Icon::Link, false).on_click(cx.listener(|this, _, _, cx| this.save_transport(cx))))
+                .children(self.transport_notice.as_ref().map(|message| label(message, 12., MUTED))))
             .child(div().mt(px(10.)).p(px(22.)).rounded(px(12.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Download folder", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("New downloads are saved here. Existing transfers keep their destination.", 13., MUTED))
@@ -1244,6 +1385,26 @@ fn metric(title: &str, value: &str, color: u32) -> Div {
             label(value, 24., color)
                 .font_weight(FontWeight::MEDIUM)
                 .whitespace_nowrap(),
+        )
+}
+
+fn transport_input(title: &str, input: Entity<TextInput>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.))
+        .child(label(title, 12., MUTED))
+        .child(
+            div()
+                .h(px(40.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .bg(rgb(BG))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgb(RULE))
+                .child(input),
         )
 }
 

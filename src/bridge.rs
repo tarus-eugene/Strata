@@ -93,6 +93,12 @@ pub enum Request {
         #[serde(default)]
         referrer: Option<String>,
     },
+    Transfer {
+        source: String,
+        directory: Option<std::path::PathBuf>,
+        connections: Option<usize>,
+        options: Box<crate::protocol::TransferOptions>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -158,6 +164,28 @@ fn dispatch(manager: &Arc<Manager>, request: Request) -> Reply {
         } => manager
             .add_from_browser(&url, filename.as_deref(), referrer.as_deref())
             .map(Some),
+        Request::Transfer {
+            source,
+            directory,
+            connections,
+            options,
+        } => {
+            let settings = manager.settings.lock().unwrap().clone();
+            let result = manager
+                .add_with_options(
+                    &source,
+                    directory.unwrap_or(settings.directory),
+                    connections.unwrap_or(settings.connections),
+                    *options,
+                )
+                .map(Some);
+            if result.is_ok() {
+                manager
+                    .show_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            result
+        }
     };
     match result {
         Ok(id) => Reply {
@@ -461,6 +489,35 @@ mod tests {
             .unwrap();
         assert!(!reply.ok);
         assert!(manager.snapshots().is_empty());
+        let reply = rt
+            .block_on(send(
+                &Request::Transfer {
+                    source: "http://127.0.0.1:9/cli-file.bin".into(),
+                    directory: Some(dir.path().into()),
+                    connections: Some(4),
+                    options: Box::default(),
+                },
+                &history,
+                false,
+            ))
+            .unwrap();
+        assert!(reply.ok, "{:?}", reply.error);
+        let id = reply.id.unwrap();
+        assert_eq!(
+            manager
+                .snapshots()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap()
+                .connections,
+            4
+        );
+        assert!(
+            manager
+                .show_requested
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        );
+        manager.cancel(id);
         drop(listener);
         manager.shutdown();
     }

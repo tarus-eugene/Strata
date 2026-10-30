@@ -107,6 +107,13 @@ fn serve(
     let plain = request.contains("/plain");
     let bad = request.contains("/bad");
     let empty = request.contains("/empty");
+    let corrupt = request.contains("/corrupt");
+    if request.contains("/basic") && !request.contains("authorization: basic ") {
+        stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        return Ok(());
+    }
     let range = request
         .lines()
         .find_map(|l| l.strip_prefix("range: bytes="));
@@ -116,7 +123,11 @@ fn serve(
             let (a, b) = range.split_once('-').unwrap();
             (
                 a.parse::<usize>().unwrap(),
-                b.parse::<usize>().unwrap(),
+                if b.is_empty() {
+                    total - 1
+                } else {
+                    b.parse::<usize>().unwrap()
+                },
                 true,
             )
         } else {
@@ -143,10 +154,13 @@ fn serve(
         };
         headers += &format!("Content-Range: bytes {begin}-{end}/{total}\r\n");
     }
+    if request.contains("/video.mp4") {
+        headers += "Content-Type: video/mp4\r\n";
+    }
     stream.write_all(format!("{headers}\r\n").as_bytes())?;
     if total > 0 {
         for chunk in bytes[start..=end].chunks(8192) {
-            if changed {
+            if changed || corrupt {
                 let data: Vec<_> = chunk.iter().map(|v| v.wrapping_add(1)).collect();
                 stream.write_all(&data)?;
             } else {
@@ -426,4 +440,290 @@ fn refuses_browser_handoff_if_history_cannot_be_saved() {
     );
     assert!(manager.snapshots().is_empty());
     manager.shutdown();
+}
+
+#[test]
+fn webdav_authentication_is_forwarded_without_persisting_passwords() {
+    let server = Server::new();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Manager::new(dir.path().join("history.json")).unwrap();
+    let url = server
+        .url("/basic.bin")
+        .replace("http://", "webdav://alice:test-password@");
+    let id = manager.add(&url, dir.path().into(), 8).unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(done.protocol, strata::protocol::Protocol::WebDav);
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.contains("authorization: basic "))
+    );
+    manager.shutdown();
+    let saved = std::fs::read_to_string(dir.path().join("history.json")).unwrap();
+    assert!(!saved.contains("test-password"));
+    assert!(!done.url.contains("alice@"));
+}
+
+#[test]
+fn downloads_byte_exact_ranges_through_an_explicit_http_proxy() {
+    let proxy = Server::new();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Manager::new(dir.path().join("history.json")).unwrap();
+    let options = strata::protocol::TransferOptions {
+        proxy: Some(strata::protocol::Proxy::parse(&proxy.address).unwrap()),
+        ..Default::default()
+    };
+    assert!(
+        manager
+            .add_with_options("sftp://host/file", dir.path().into(), 1, options.clone())
+            .is_err()
+    );
+    assert!(manager.snapshots().is_empty());
+    let id = manager
+        .add_with_options(
+            "http://must-not-resolve.invalid/file.bin",
+            dir.path().into(),
+            8,
+            options,
+        )
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(std::fs::read(done.path()).unwrap(), *proxy.bytes);
+    assert!(
+        proxy
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.starts_with("get http://must-not-resolve.invalid/"))
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn metalink_tries_another_mirror_on_hash_mismatch_and_verifies_all_hash_types() {
+    use sha2::Digest;
+    let server = Server::new();
+    let dir = tempfile::tempdir().unwrap();
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&*server.bytes));
+    let sha512 = format!("{:x}", sha2::Sha512::digest([]));
+    let md5 = format!("{:x}", md5::Md5::digest([]));
+    let descriptor = format!(
+        r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="folder/file.bin"><size>{}</size><hash type="sha-256">{sha256}</hash><url priority="1">{}</url><url priority="2">{}</url></file><file name="empty.bin"><size>0</size><hash type="sha-512">{sha512}</hash><hash type="md5">{md5}</hash><url>{}</url></file></metalink>"#,
+        server.bytes.len(),
+        server.url("/corrupt"),
+        server.url("/good"),
+        server.url("/empty")
+    );
+    let path = dir.path().join("test.meta4");
+    std::fs::write(&path, descriptor).unwrap();
+    let manager = Manager::new(dir.path().join("history.json")).unwrap();
+    let id = manager
+        .add(&path.to_string_lossy(), dir.path().into(), 8)
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(
+        std::fs::read(done.path().join("folder/file.bin")).unwrap(),
+        *server.bytes
+    );
+    assert_eq!(
+        std::fs::metadata(done.path().join("empty.bin"))
+            .unwrap()
+            .len(),
+        0
+    );
+    let requests = server.requests.lock().unwrap();
+    assert!(requests.iter().any(|r| r.contains("/corrupt")));
+    assert!(requests.iter().any(|r| r.contains("/good")));
+    assert!(!done.parts_dir().exists());
+    manager.shutdown();
+}
+
+struct SocksProxy {
+    url: String,
+    connections: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    task: Option<thread::JoinHandle<()>>,
+}
+impl SocksProxy {
+    fn new(target: String) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!(
+            "socks5h://bob:proxy-test-password@{}",
+            listener.local_addr().unwrap()
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let count = connections.clone();
+        let task = thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                if let Ok((mut client, _)) = listener.accept() {
+                    let target = target.clone();
+                    let count = count.clone();
+                    thread::spawn(move || {
+                        let mut run = || -> std::io::Result<()> {
+                            client.set_nonblocking(false)?;
+                            client.set_read_timeout(Some(Duration::from_secs(5)))?;
+                            let mut greeting = [0; 2];
+                            client.read_exact(&mut greeting)?;
+                            let mut methods = vec![0; greeting[1] as usize];
+                            client.read_exact(&mut methods)?;
+                            if greeting[0] != 5 || !methods.contains(&2) {
+                                return Err(std::io::ErrorKind::InvalidData.into());
+                            }
+                            client.write_all(&[5, 2])?;
+                            let mut auth = [0; 2];
+                            client.read_exact(&mut auth)?;
+                            let mut user = vec![0; auth[1] as usize];
+                            client.read_exact(&mut user)?;
+                            let mut len = [0];
+                            client.read_exact(&mut len)?;
+                            let mut password = vec![0; len[0] as usize];
+                            client.read_exact(&mut password)?;
+                            if user != b"bob" || password != b"proxy-test-password" {
+                                return Err(std::io::ErrorKind::PermissionDenied.into());
+                            }
+                            client.write_all(&[1, 0])?;
+                            let mut connect = [0; 4];
+                            client.read_exact(&mut connect)?;
+                            if connect != [5, 1, 0, 3] {
+                                return Err(std::io::ErrorKind::InvalidData.into());
+                            }
+                            client.read_exact(&mut len)?;
+                            let mut hostname = vec![0; len[0] as usize];
+                            client.read_exact(&mut hostname)?;
+                            if hostname != b"resolve-via-proxy.invalid" {
+                                return Err(std::io::ErrorKind::InvalidData.into());
+                            }
+                            let mut port = [0; 2];
+                            client.read_exact(&mut port)?;
+                            let mut upstream = TcpStream::connect(&target)?;
+                            upstream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                            client.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])?;
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let mut from_client = client.try_clone()?;
+                            let mut to_server = upstream.try_clone()?;
+                            let writer = thread::spawn(move || {
+                                let _ = std::io::copy(&mut from_client, &mut to_server);
+                            });
+                            let _ = std::io::copy(&mut upstream, &mut client);
+                            let _ = client.shutdown(std::net::Shutdown::Both);
+                            let _ = writer.join();
+                            Ok(())
+                        };
+                        let _ = run();
+                    });
+                } else {
+                    thread::sleep(Duration::from_millis(3));
+                }
+            }
+        });
+        Self {
+            url,
+            connections,
+            stop,
+            task: Some(task),
+        }
+    }
+}
+impl Drop for SocksProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.task.take().unwrap().join();
+    }
+}
+
+#[test]
+fn socks5_proxy_authentication_remote_dns_and_parallel_ranges_are_byte_exact() {
+    let server = Server::new();
+    let socks = SocksProxy::new(server.address.trim_start_matches("http://").to_owned());
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Manager::new(directory.path().join("history.json")).unwrap();
+    let options = strata::protocol::TransferOptions {
+        proxy: Some(strata::protocol::Proxy::parse(&socks.url).unwrap()),
+        ..Default::default()
+    };
+    let id = manager
+        .add_with_options(
+            "http://resolve-via-proxy.invalid/file.bin",
+            directory.path().into(),
+            8,
+            options,
+        )
+        .unwrap();
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    assert!(socks.connections.load(Ordering::SeqCst) > 1);
+    manager.shutdown();
+    assert!(
+        !std::fs::read_to_string(directory.path().join("history.json"))
+            .unwrap()
+            .contains("proxy-test-password")
+    );
+}
+
+#[test]
+#[ignore = "requires pinned yt-dlp media helpers; run scripts/fetch-media-tools.ps1 first"]
+fn ytdlp_download_pause_and_resume_are_byte_exact() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Manager::new(directory.path().join("history.json")).unwrap();
+    let options = strata::protocol::TransferOptions {
+        protocol: Some(strata::protocol::Protocol::Video),
+        ..Default::default()
+    };
+    let id = manager
+        .add_with_options(
+            &server.url("/video.mp4"),
+            directory.path().into(),
+            4,
+            options,
+        )
+        .unwrap();
+    let active = wait(&manager, id, |d| {
+        d.downloaded > 64 * 1024 || matches!(d.status, Status::Failed | Status::Complete)
+    });
+    assert_eq!(active.status, Status::Downloading, "{:?}", active.error);
+    manager.pause(id);
+    let paused = wait(&manager, id, |d| {
+        matches!(d.status, Status::Paused | Status::Failed)
+    });
+    assert_eq!(paused.status, Status::Paused, "{:?}", paused.error);
+    manager.resume(id);
+    let done = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(done.status, Status::Complete, "{:?}", done.error);
+    let files = std::fs::read_dir(done.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read(&files[0]).unwrap(), *server.bytes);
+    assert!(!done.parts_dir().exists());
+    manager.shutdown();
+    assert!(server.requests.lock().unwrap().iter().any(|request| {
+        request
+            .lines()
+            .any(|line| line.starts_with("range: bytes=") && !line.starts_with("range: bytes=0-"))
+    }));
 }

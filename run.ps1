@@ -1,7 +1,8 @@
 param(
     [ValidateSet('run', 'build', 'test', 'check', 'fmt', 'clippy')]
     [string]$Task = 'run',
-    [switch]$Release
+    [switch]$Release,
+    [string[]]$CargoArguments = @()
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -28,5 +29,6 @@ if (Test-Path $vswhere) {
 }
 $cargoArgs = @($Task)
 if ($Release -and $Task -in @('run', 'build', 'test', 'check', 'clippy')) { $cargoArgs += '--release' }
+$cargoArgs += $CargoArguments
 & cargo @cargoArgs
 exit $LASTEXITCODE

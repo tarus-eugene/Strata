@@ -2,6 +2,11 @@ export const HOST = 'com.strata.download_manager';
 const pendingPrefix = 'handoff:';
 const active = new Set();
 
+export function remoteLink(input) {
+  try { const url = new URL(input); return ['http:', 'https:', 'ftp:', 'sftp:', 'webdav:', 'webdavs:', 'magnet:'].includes(url.protocol); }
+  catch { return false; }
+}
+
 export function eligible(item) {
   try {
     const url = new URL(item.finalUrl || item.url);
@@ -85,7 +90,7 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
   chrome.runtime.onInstalled.addListener(async () => {
     await chrome.contextMenus.removeAll();
     chrome.contextMenus.create({ id: 'send-to-strata', title: 'Download with Strata',
-      contexts: ['link'], targetUrlPatterns: ['http://*/*', 'https://*/*'] });
+      contexts: ['link'] });
   });
   chrome.downloads.onCreated.addListener(item => {
     ready.then(() => captureDownload(item, chrome)).catch(error => record(chrome, error.message, true));
@@ -93,6 +98,7 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
   chrome.contextMenus.onClicked.addListener(async info => {
     if (info.menuItemId !== 'send-to-strata') return;
     try {
+      if (!remoteLink(info.linkUrl)) throw new Error('Choose an HTTP, FTP, SFTP, WebDAV, or magnet download link.');
       const reply = await chrome.runtime.sendNativeMessage(HOST, {
         action: 'download', url: info.linkUrl,
         referrer: /^https?:\/\//i.test(info.pageUrl || '') ? info.pageUrl : null,

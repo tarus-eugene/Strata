@@ -22,6 +22,10 @@ async fn run() -> anyhow::Result<Reply> {
         "This bridge only accepts the Strata browser extension"
     );
     let request = bridge::read_message(&mut std::io::stdin().lock())?;
+    anyhow::ensure!(
+        !matches!(request, Request::Transfer { .. }),
+        "Advanced transfer options are available only through the local Strata CLI"
+    );
     #[cfg(windows)]
     {
         bridge::send(
