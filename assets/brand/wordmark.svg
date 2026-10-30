@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80" viewBox="0 0 300 80">
+  <g transform="translate(8 8)" fill="#82b9e7">
+    <path d="M8 8 32 20 56 8V18L32 30 8 18Z"/>
+    <path d="M8 25 32 37 56 25V35L32 47 8 35Z"/>
+    <path d="M19 47 32 53 45 47V56L32 62 19 56Z"/>
+  </g>
+  <text x="90" y="56" fill="#f0f1f2" font-family="Segoe UI, sans-serif" font-size="46" font-weight="600" letter-spacing="-1">strata</text>
+</svg>
