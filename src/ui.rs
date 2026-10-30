@@ -803,6 +803,7 @@ impl Strata {
                 .min_h_0()
                 .child(
                     div()
+                        .w_full()
                         .p(px(22.))
                         .flex()
                         .flex_col()
@@ -849,7 +850,7 @@ impl Strata {
                                     .pb(px(5.)),
                                 ),
                         )
-                        .child(progress(d.fraction(), status_color(d.status)))
+                        .child(progress(d.fraction(), status_color(d.status)).w(px(width - 44.)))
                         .child(label(
                             format!(
                                 "{} of {}",
@@ -1175,7 +1176,7 @@ fn progress(value: f32, color: u32) -> Div {
         .child(
             div()
                 .w(relative(value.clamp(0., 1.)))
-                .h_full()
+                .h(px(4.))
                 .rounded_full()
                 .bg(rgb(color)),
         )
