@@ -24,7 +24,9 @@ The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to repr
 ## Using Strata
 
 - Add a URL or magnet with **New download** or **Ctrl+N**. A valid source on the clipboard is filled in automatically. **Open torrent / Metalink file** selects a local descriptor. Press **Enter** to start.
-- Search with **Ctrl+F**. The download table shows file name, size, status, progress, and speed. Click a row to inspect its individual connection lanes, destination, and source in the bottom details panel.
+- Search with **Ctrl+F**. The full-width download table shows file name, size, status, progress, and speed. Use **Filter** at the top for All downloads, In progress, Completed, or Stopped; **Settings** is at the top right.
+- Click a row to inspect its destination, source, and one segmented connection-progress bar in the bottom panel. Drag the panel's top divider to resize it; focus the divider and press **Up/Down** for keyboard resizing. Its height is remembered.
+- Each row's **three-dot menu** contains its available pause/resume, open, open-folder, copy-link, cancel, and delete actions. **Delete** stops the transfer and removes its history entry while keeping downloaded files and partial data.
 - Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides Strata to the system tray and keeps downloads running.** Click the tray icon or choose **Open Strata** from its right-click menu to restore it. Launching the app again also restores its existing window.
 - To fully exit, right-click the tray icon and choose **Quit Strata**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
 - Choose the download folder and 1, 4, 8, or 16 connections in Settings. Up to three downloads run simultaneously.
@@ -35,7 +37,7 @@ The tray icon is removed on quit and re-added after Windows Explorer restarts. I
 
 ## Windows installer
 
-Run `dist\Strata-Setup-0.1.1-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+Run `dist\Strata-Setup-0.1.2-x64.exe` to install Strata for your Windows account. Administrator access is not required. It includes the optimized app, `strata-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
 
 The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit Strata through its tray menu before upgrading or uninstalling.
 
@@ -112,7 +114,7 @@ Keep `strata.exe` and `strata-bridge.exe` in the same folder. If you move the ex
 
 With capture enabled, the extension pauses eligible HTTP/HTTPS file downloads, sends the URL, browser-provided filename, and referrer to Strata, and cancels Chrome's paused copy **only after the app confirms the download was saved to its queue**. If the native host is unavailable or the app refuses the request, Chrome resumes its own download. A suspended extension worker recovers its pending handoffs on restart.
 
-You can also right-click a file link and choose **Download with Strata**, or paste a URL into the popup. The app opens automatically for a download if it is closed. Checking connection status alone does not open it.
+Capture is enabled by default: start a normal browser download and it is sent to Strata automatically, with no **Download with Strata** action required. Accepted browser downloads open or restore the app, including when it is hidden in the tray. Downloads awaiting browser scanning are retried when the browser reports them safe. The context-menu command and popup URL field remain optional shortcuts. Checking connection status alone does not open the app.
 
 The extension uses Manifest V3 with only `downloads`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in Strata.
 
