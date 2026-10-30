@@ -30,19 +30,22 @@ async function record(api, message, error = false) {
 
 export async function captureDownload(item, api) {
   if (!eligible(item) || item.byExtensionId === api.runtime.id || active.has(item.id)) return false;
-  const { captureEnabled = true } = await api.storage.local.get('captureEnabled');
-  if (!captureEnabled) return false;
   const key = `${pendingPrefix}${item.id}`;
   active.add(item.id);
   let paused = false;
   let accepted = false;
   try {
+    const { captureEnabled = true } = await api.storage.local.get('captureEnabled');
+    if (!captureEnabled) return false;
     // Persist recovery state before pausing; a suspended worker must not strand Chrome's transfer.
     await api.storage.local.set({ [key]: { id: item.id, startTime: item.startTime, phase: 'pending' } });
     await api.downloads.pause(item.id);
     paused = true;
     const [current] = await api.downloads.search({ id: item.id });
-    if (!current || current.state !== 'in_progress' || !current.paused) return false;
+    if (!current || !current.paused || !eligible({ ...item, ...current, paused: false })) {
+      if (current?.state === 'in_progress' && current.paused) await api.downloads.resume(item.id);
+      return false;
+    }
     const reply = await api.runtime.sendNativeMessage(HOST, nativeRequest({ ...item, ...current }));
     if (reply?.ok !== true || !Number.isSafeInteger(reply.id) || reply.id <= 0) {
       throw new Error(reply?.error || 'Strata did not accept the download.');
@@ -70,6 +73,12 @@ export async function captureDownload(item, api) {
   }
 }
 
+export async function captureChanged(delta, api) {
+  if (!['safe', 'deepScannedSafe'].includes(delta.danger?.current)) return false;
+  const [item] = await api.downloads.search({ id: delta.id });
+  return item ? captureDownload(item, api) : false;
+}
+
 export async function recoverPending(api) {
   const stored = await api.storage.local.get(null);
   for (const [key, pending] of Object.entries(stored)) {
@@ -94,6 +103,9 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
   });
   chrome.downloads.onCreated.addListener(item => {
     ready.then(() => captureDownload(item, chrome)).catch(error => record(chrome, error.message, true));
+  });
+  chrome.downloads.onChanged.addListener(delta => {
+    ready.then(() => captureChanged(delta, chrome)).catch(error => record(chrome, error.message, true));
   });
   chrome.contextMenus.onClicked.addListener(async info => {
     if (info.menuItemId !== 'send-to-strata') return;

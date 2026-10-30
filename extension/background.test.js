@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureDownload, eligible, recoverPending, remoteLink } from './background.js';
+import { captureDownload, captureChanged, eligible, recoverPending, remoteLink } from './background.js';
 
 test('context menu accepts remote protocols while refusing local files and executable schemes', () => {
   for (const url of ['https://host/a', 'ftp://host/a', 'sftp://user@host/a', 'webdav://host/a', 'magnet:?xt=urn:btih:abc']) assert.equal(remoteLink(url), true);
@@ -51,6 +51,26 @@ test('resumes Chrome if the app rejects the request or the bridge is absent', as
 test('keeps Chrome untouched when capture is disabled', async () => {
   const api = mock(); api.values.captureEnabled = false;
   assert.equal(await captureDownload(item, api), false); assert.deepEqual(api.calls, []);
+});
+
+test('concurrent automatic events hand a browser download off only once', async () => {
+  const api = mock();
+  const results = await Promise.all([captureDownload(item, api), captureDownload(item, api)]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(api.calls.filter(c => c[0] === 'native').length, 1);
+});
+
+test('captures automatically once browser scanning reports the download safe', async () => {
+  const api = mock();
+  assert.equal(await captureDownload({ ...item, danger: 'asyncScanning' }, api), false);
+  assert.equal(await captureChanged({ id: item.id, danger: { current: 'safe' } }, api), true);
+  assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'native', 'cancel']);
+});
+
+test('does not hand off a download that becomes unsafe while it is being paused', async () => {
+  const api = mock(); api.setCurrent({ ...item, danger: 'url' });
+  assert.equal(await captureDownload(item, api), false);
+  assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'resume']);
 });
 
 test('skips private, unsafe, completed, paused and browser-generated downloads', async () => {

@@ -5,7 +5,7 @@
 3. Click **Load unpacked** and select this folder.
 4. Pin the Strata extension and check that the popup says **Connected to Strata**. Repeat in each browser profile you use.
 
-Leave **Capture downloads** on to send eligible HTTP/HTTPS file downloads to the app. Turn it off to keep downloads in Chrome. You can also paste a link into the popup or right-click a link and choose **Download with Strata**.
+Capture is enabled by default. Start an eligible HTTP/HTTPS file download normally: it is sent to Strata automatically, and Strata opens or restores from the tray. No right-click command is required. Downloads awaiting browser scanning are handed off when scanning reports them safe. Turn **Capture downloads** off to keep downloads in your browser. Pasting a link or choosing **Download with Strata** remains an optional shortcut.
 
 The extension pauses Chrome's copy while it asks Strata to accept the file. Chrome's copy is canceled only after the app confirms acceptance. If the bridge or app is unavailable, the browser download resumes.
 

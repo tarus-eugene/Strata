@@ -161,9 +161,17 @@ fn dispatch(manager: &Arc<Manager>, request: Request) -> Reply {
             url,
             filename,
             referrer,
-        } => manager
-            .add_from_browser(&url, filename.as_deref(), referrer.as_deref())
-            .map(Some),
+        } => {
+            let result = manager
+                .add_from_browser(&url, filename.as_deref(), referrer.as_deref())
+                .map(Some);
+            if result.is_ok() {
+                manager
+                    .show_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            result
+        }
         Request::Transfer {
             source,
             directory,
@@ -489,6 +497,29 @@ mod tests {
             .unwrap();
         assert!(!reply.ok);
         assert!(manager.snapshots().is_empty());
+        assert!(
+            !manager
+                .show_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        let reply = rt
+            .block_on(send(
+                &Request::Download {
+                    url: "http://127.0.0.1:9/browser-file.bin".into(),
+                    filename: Some("browser-file.bin".into()),
+                    referrer: None,
+                },
+                &history,
+                false,
+            ))
+            .unwrap();
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(
+            manager
+                .show_requested
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        );
+        manager.cancel(reply.id.unwrap());
         let reply = rt
             .block_on(send(
                 &Request::Transfer {
