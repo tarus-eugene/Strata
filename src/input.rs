@@ -127,6 +127,13 @@ impl TextInput {
         cx.notify();
     }
 
+    pub fn select_prefix(&mut self, end: usize, cx: &mut Context<Self>) {
+        if self.content.is_char_boundary(end) {
+            self.move_to(0, cx);
+            self.select_to(end, cx);
+        }
+    }
+
     pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("backspace", Backspace, Some("TextInput")),

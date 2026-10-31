@@ -21,7 +21,9 @@ impl Manager {
                             ..Default::default()
                         }),
                         runtime_worker_threads: Some(4),
-                        client_name_and_version: Some("101Downloader/0.2".into()),
+                        client_name_and_version: Some(
+                            concat!("101Downloader/", env!("CARGO_PKG_VERSION")).into(),
+                        ),
                         ..Default::default()
                     },
                 )
@@ -38,7 +40,8 @@ impl Manager {
         };
         let response = tokio::select! {
             result = session.add_torrent(add, Some(AddTorrentOptions { paused: true, overwrite: true,
-                output_folder: Some(content.to_string_lossy().into_owned()), peer_limit: Some(d.connections), ..Default::default() })) => result?,
+                output_folder: Some(content.to_string_lossy().into_owned()), peer_limit: Some(d.connections),
+                ratelimits: librqbit::limits::LimitsConfig { download_bps: std::num::NonZeroU32::new(job.effective_speed_limit().min(u32::MAX as u64) as u32), ..Default::default() }, ..Default::default() })) => result?,
             _ = stopped(job) => bail!("Transfer stopped"),
         };
         let (id, handle) = match response {
@@ -166,6 +169,11 @@ mod tests {
         let descriptor = directory.path().join("test.torrent");
         fs::write(&descriptor, metadata.as_bytes().unwrap()).unwrap();
         let manager = Manager::new(directory.path().join("history.json")).unwrap();
+        manager
+            .set_global_speed_limit(1024 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
         let client = Session::new_with_opts(
             directory.path().join("session"),
             SessionOptions {

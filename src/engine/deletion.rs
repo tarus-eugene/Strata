@@ -56,6 +56,9 @@ impl Manager {
         };
         {
             let mut data = job.data.lock().unwrap();
+            if job.editing.load(Ordering::SeqCst) {
+                return;
+            }
             if job.deleting.swap(true, Ordering::SeqCst) {
                 return;
             }

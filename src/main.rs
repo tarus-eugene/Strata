@@ -1,7 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod brand;
+mod datetime;
 mod input;
+mod scroll;
 mod text;
 mod tray;
 mod ui;
@@ -94,7 +96,7 @@ fn main() -> anyhow::Result<()> {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(1020.), px(700.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("101 Downloader — Download manager".into()),
+                        title: Some("101 Downloader".into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),

@@ -169,6 +169,10 @@ impl Manager {
                 position + count as u64 <= size,
                 "The SFTP file grew during download"
             );
+            if let Err(error) = job.throttle(count).await {
+                local.flush().await?;
+                return Err(error);
+            }
             local.write_all(&buffer[..count]).await?;
             position += count as u64;
             tools::update_file_progress(job, position);

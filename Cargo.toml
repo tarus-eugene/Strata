@@ -1,6 +1,6 @@
 [package]
 name = "strata"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "101 Downloader: a native parallel download manager built with GPUI"
 license = "MIT"
@@ -33,7 +33,7 @@ russh-sftp = "3"
 librqbit = { version = "9", optional = true, default-features = false, features = ["rust-tls"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_Globalization", "Win32_System_Time", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 windows-registry = "0.5"
 
 [build-dependencies]

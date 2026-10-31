@@ -1,14 +1,15 @@
 use crate::input::TextInput;
+use crate::scroll::{BAR_WIDTH, ScrollState, scroll_area};
 use crate::tray::Tray;
 use gpui::{prelude::*, *};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
-use strata::engine::{Download, Manager, Status};
+use strata::engine::{Download, DownloadChange, Manager, Priority, Status};
 
 const BG: u32 = 0x000000;
 const SURFACE: u32 = 0x191919;
@@ -34,6 +35,14 @@ enum View {
 enum Menu {
     Filters,
     Download(u64),
+    Priority(u64),
+}
+
+#[derive(Clone)]
+enum EditModal {
+    Rename(u64),
+    SpeedLimit(Vec<u64>),
+    GlobalSpeedLimit,
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +55,10 @@ enum MenuAction {
     Folder(u64),
     Copy(u64),
     Open(u64),
+    Rename(u64),
+    SpeedLimit(u64),
+    Priority(u64),
+    SetPriority(u64, Priority),
 }
 
 #[derive(Clone, Copy)]
@@ -69,6 +82,8 @@ enum Icon {
     Filter,
     More,
     Trash,
+    ChevronDown,
+    ChevronUp,
 }
 
 pub struct Strata {
@@ -78,8 +93,15 @@ pub struct Strata {
     downloads: Vec<Download>,
     view: View,
     selected: Option<u64>,
+    checked: BTreeSet<u64>,
+    selection_anchor: Option<u64>,
+    edit: Option<EditModal>,
+    edit_input: Entity<TextInput>,
+    edit_error: Option<String>,
+    edit_saving: bool,
     url: Entity<TextInput>,
     search: Entity<TextInput>,
+    search_query: String,
     proxy: Entity<TextInput>,
     identity: Entity<TextInput>,
     known_hosts: Entity<TextInput>,
@@ -92,17 +114,25 @@ pub struct Strata {
     menu_index: usize,
     menu_focus: FocusHandle,
     details_height: f32,
+    details_collapsed: bool,
     resizing: Option<(Pixels, f32)>,
     modal_close_focus: FocusHandle,
     modal_choose_focus: FocusHandle,
     modal_start_focus: FocusHandle,
     browser_registered: bool,
     browser_notice: Option<String>,
+    update_checking: bool,
+    update_available: Option<strata::updates::Update>,
+    update_notice: Option<String>,
     directory: PathBuf,
     connections: usize,
     rates: HashMap<u64, f64>,
     previous: HashMap<u64, u64>,
     sampled_at: Instant,
+    queue_scroll: ScrollState,
+    settings_scroll: ScrollState,
+    add_scroll: ScrollState,
+    edit_scroll: ScrollState,
     _ticker: Task<()>,
     _search_observer: Subscription,
 }
@@ -119,19 +149,18 @@ impl Strata {
             .bg(rgb(BG))
             .border_b_1()
             .border_color(rgb(RULE))
-            .window_control_area(WindowControlArea::Drag)
             .child(
                 div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
                     .px(px(28.))
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(
-                        img("brand/mark.png").size(px(25.)),
-                    )
+                    .child(img("brand/mark.png").size(px(25.)))
                     .child(label("101 Downloader", 17., TEXT).font_weight(FontWeight::SEMIBOLD)),
             )
-            .child(label("Download manager", 12., FAINT).flex_1())
             .child(
                 window_control("window-minimize", Icon::Minimize, WindowControlArea::Min).on_click(
                     |_, window, cx| {
@@ -180,6 +209,7 @@ impl Strata {
         let url =
             cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", window, cx));
         let search = cx.new(|cx| TextInput::new("Search downloads", window, cx));
+        let edit_input = cx.new(|cx| TextInput::new("", window, cx));
         let proxy = cx.new(|cx| {
             TextInput::new(
                 "http://, https:// or socks5:// proxy (optional)",
@@ -223,7 +253,20 @@ impl Strata {
                 cx,
             )
         });
-        let observer = cx.observe(&search, |_, _, cx| cx.notify());
+        let observer = cx.observe(&search, |this, _, cx| {
+            let query = this.search.read(cx).value().to_owned();
+            if query == this.search_query {
+                return;
+            }
+            this.search_query = query;
+            if !this.search_query.is_empty() {
+                this.view = View::All;
+            }
+            this.checked.clear();
+            this.selection_anchor = None;
+            this.selected = None;
+            cx.notify();
+        });
         let ticker = cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -247,7 +290,9 @@ impl Strata {
                             }
                         }
                         this.refresh();
-                        if !this.tray.as_ref().is_some_and(|tray| tray.is_hidden()) {
+                        if this.view != View::Settings
+                            && !this.tray.as_ref().is_some_and(|tray| tray.is_hidden())
+                        {
                             cx.notify();
                         }
                     })
@@ -261,15 +306,22 @@ impl Strata {
         window.focus(&focus);
         let downloads = manager.snapshots();
         let selected = downloads.last().map(|d| d.id);
-        Self {
+        let mut app = Self {
             manager,
             tray,
             tray_error,
             downloads,
             view: View::All,
             selected,
+            checked: selected.into_iter().collect(),
+            selection_anchor: selected,
+            edit: None,
+            edit_input,
+            edit_error: None,
+            edit_saving: false,
             url,
             search,
+            search_query: String::new(),
             proxy,
             identity,
             known_hosts,
@@ -282,26 +334,38 @@ impl Strata {
             menu_index: 0,
             menu_focus: cx.focus_handle(),
             details_height: settings.details_height,
+            details_collapsed: false,
             resizing: None,
             modal_close_focus: cx.focus_handle(),
             modal_choose_focus: cx.focus_handle(),
             modal_start_focus: cx.focus_handle(),
             browser_registered: strata::bridge::browsers_registered(),
             browser_notice: None,
+            update_checking: false,
+            update_available: None,
+            update_notice: None,
             directory: settings.directory,
             connections: settings.connections,
             rates: HashMap::new(),
             previous: HashMap::new(),
             sampled_at: Instant::now(),
+            queue_scroll: ScrollState::default(),
+            settings_scroll: ScrollState::default(),
+            add_scroll: ScrollState::default(),
+            edit_scroll: ScrollState::default(),
             _ticker: ticker,
             _search_observer: observer,
-        }
+        };
+        app.check_for_updates(window, cx);
+        app
     }
 
     fn refresh(&mut self) {
         let elapsed = self.sampled_at.elapsed().as_secs_f64();
         let previous_id = self.downloads.last().map(|d| d.id);
         self.downloads = self.manager.snapshots();
+        self.checked
+            .retain(|id| self.downloads.iter().any(|d| d.id == *id));
         if self
             .selected
             .is_some_and(|id| !self.downloads.iter().any(|d| d.id == id))
@@ -312,6 +376,8 @@ impl Strata {
             && previous_id.is_none_or(|previous| id > previous)
         {
             self.selected = Some(id);
+            self.checked = [id].into_iter().collect();
+            self.selection_anchor = Some(id);
             self.view = View::All;
         }
         for d in &self.downloads {
@@ -492,31 +558,143 @@ impl Strata {
             .collect()
     }
 
+    fn toolbar_actions(&self) -> Vec<(&'static str, Icon, MenuAction)> {
+        let Some(id) = self
+            .selected
+            .filter(|id| self.checked.contains(id))
+            .or_else(|| self.checked.iter().next().copied())
+        else {
+            return vec![];
+        };
+        if self.checked.len() == 1 {
+            return self.menu_items(Menu::Download(id));
+        }
+        let selected = self
+            .downloads
+            .iter()
+            .filter(|d| self.checked.contains(&d.id))
+            .collect::<Vec<_>>();
+        let mut actions = Vec::new();
+        if selected.iter().any(|d| {
+            matches!(
+                d.status,
+                Status::Queued | Status::Connecting | Status::Downloading
+            )
+        }) {
+            actions.push(("Pause selected", Icon::Pause, MenuAction::Pause(id)));
+        }
+        if selected
+            .iter()
+            .any(|d| matches!(d.status, Status::Paused | Status::Failed))
+        {
+            actions.push(("Resume selected", Icon::Play, MenuAction::Resume(id)));
+        }
+        actions.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
+        actions.push(("Set priority", Icon::Arrow, MenuAction::Priority(id)));
+        if selected.iter().any(|d| {
+            !matches!(
+                d.status,
+                Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
+            )
+        }) {
+            actions.push(("Cancel selected", Icon::Close, MenuAction::Cancel(id)));
+        }
+        if selected.iter().any(|d| d.status != Status::Deleting) {
+            actions.push((
+                "Delete selected from device",
+                Icon::Trash,
+                MenuAction::Delete(id),
+            ));
+        }
+        actions
+    }
+
     fn topbar(&self, cx: &mut Context<Self>) -> Div {
+        let settings_open = self.view == View::Settings;
+        let actions = self.toolbar_actions();
         div()
-            .h(px(64.))
+            .h(px(60.))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .justify_between()
+            .gap(px(16.))
             .px(px(28.))
             .border_b_1()
             .border_color(rgb(RULE))
             .child(
-                button("top-filter", "Filter", Icon::Filter, false).on_click(cx.listener(
-                    |this, event: &ClickEvent, window, cx| {
-                        this.show_menu(Menu::Filters, event.position(), window, cx);
-                    },
-                )),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .when(self.checked.is_empty(), |row| {
+                        row.child(
+                            button("pause-all", "Pause all", Icon::Pause, false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.manager.pause_all();
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                    })
+                    .children(actions.into_iter().map(|(text, glyph, action)| {
+                        icon_button(format!("selection-action-{text}"), glyph)
+                            .tooltip(move |_, cx| cx.new(|_| ActionTooltip(text)).into())
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if let MenuAction::Priority(id) = action {
+                                    this.show_menu(
+                                        Menu::Priority(id),
+                                        event.position(),
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    this.run_menu_action(action, window, cx);
+                                }
+                            }))
+                    })),
             )
             .child(
                 div()
+                    .w(px(if self.compact { 240. } else { 280. }))
+                    .h(px(36.))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .bg(rgb(SURFACE))
+                    .child(icon(Icon::Search, 16., MUTED))
+                    .child(self.search.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
                     .child(
-                        button("top-settings", "Settings", Icon::Settings, false).on_click(
-                            cx.listener(|this, _, _, cx| {
+                        button("top-filter", "Filter", Icon::Filter, false).on_click(cx.listener(
+                            |this, event: &ClickEvent, window, cx| {
+                                this.show_menu(Menu::Filters, event.position(), window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        button("top-settings", "Settings", Icon::Settings, false)
+                            .border_1()
+                            .border_color(rgb(if settings_open { ACCENT } else { RAISED }))
+                            .focus(move |style| {
+                                style.bg(rgb(0x444444)).border_color(rgb(if settings_open {
+                                    ACCENT
+                                } else {
+                                    RAISED
+                                }))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.menu = None;
                                 this.view = if this.view == View::Settings {
                                     View::All
@@ -524,14 +702,196 @@ impl Strata {
                                     View::Settings
                                 };
                                 cx.notify();
-                            }),
-                        ),
+                            })),
                     )
                     .child(
                         button("top-add", "New download", Icon::Plus, true)
                             .on_click(cx.listener(|this, _, window, cx| this.show_add(window, cx))),
                     ),
             )
+    }
+
+    fn action_ids(&self, id: u64) -> Vec<u64> {
+        if self.checked.contains(&id) {
+            self.checked.iter().copied().collect()
+        } else {
+            vec![id]
+        }
+    }
+
+    fn select_row(&mut self, id: u64, control: bool, shift: bool, cx: &mut Context<Self>) {
+        let visible = self.filtered(cx).iter().map(|d| d.id).collect::<Vec<_>>();
+        select_download(
+            &mut self.checked,
+            &mut self.selection_anchor,
+            &visible,
+            id,
+            control,
+            shift,
+        );
+        self.selected = self
+            .checked
+            .contains(&id)
+            .then_some(id)
+            .or_else(|| self.checked.iter().next_back().copied());
+        cx.notify();
+    }
+
+    fn open_edit(&mut self, modal: EditModal, window: &mut Window, cx: &mut Context<Self>) {
+        let (value, end) = match &modal {
+            EditModal::Rename(id) => {
+                let Some(download) = self.downloads.iter().find(|d| d.id == *id) else {
+                    return;
+                };
+                (
+                    download.name.clone(),
+                    filename_selection_end(&download.name, download.protocol.folder_output()),
+                )
+            }
+            EditModal::SpeedLimit(ids) => {
+                let Some(download) = self.downloads.iter().find(|d| ids.first() == Some(&d.id))
+                else {
+                    return;
+                };
+                let value = (download.speed_limit / 1024).to_string();
+                let end = value.len();
+                (value, end)
+            }
+            EditModal::GlobalSpeedLimit => {
+                let value = (self.manager.settings.lock().unwrap().speed_limit / 1024).to_string();
+                let end = value.len();
+                (value, end)
+            }
+        };
+        self.edit_input.update(cx, |input, cx| {
+            input.set_value(&value, cx);
+            input.select_prefix(end, cx);
+        });
+        self.adding = false;
+        self.menu = None;
+        self.edit_error = None;
+        self.edit = Some(modal);
+        self.edit_input.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn close_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.edit_saving {
+            self.edit = None;
+            self.edit_error = None;
+            self.focus.focus(window);
+            cx.notify();
+        }
+    }
+
+    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edit_saving {
+            return;
+        }
+        let Some(modal) = self.edit.clone() else {
+            return;
+        };
+        let value = self.edit_input.read(cx).value().to_owned();
+        let tasks = match modal {
+            EditModal::Rename(id) => vec![(
+                id,
+                self.manager
+                    .change_download(id, DownloadChange::Rename(value)),
+            )],
+            EditModal::SpeedLimit(ids) => {
+                let limit = match parse_speed_limit(&value) {
+                    Ok(limit) => limit,
+                    Err(error) => {
+                        self.edit_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                };
+                ids.into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            self.manager
+                                .change_download(id, DownloadChange::SpeedLimit(limit)),
+                        )
+                    })
+                    .collect()
+            }
+            EditModal::GlobalSpeedLimit => {
+                let limit = match parse_speed_limit(&value) {
+                    Ok(limit) => limit,
+                    Err(error) => {
+                        self.edit_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                };
+                vec![(0, self.manager.set_global_speed_limit(limit))]
+            }
+        };
+        self.edit_saving = true;
+        self.edit_error = None;
+        let names = self
+            .downloads
+            .iter()
+            .map(|d| (d.id, d.name.clone()))
+            .collect::<HashMap<_, _>>();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut errors = Vec::new();
+            for (id, task) in tasks {
+                let name = names
+                    .get(&id)
+                    .map(String::as_str)
+                    .unwrap_or("Global speed limit");
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => errors.push(format!("{name}: {error:#}")),
+                    Err(error) => errors.push(format!("{name}: {error}")),
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.edit_saving = false;
+                this.refresh();
+                if errors.is_empty() {
+                    this.close_edit(window, cx);
+                } else {
+                    this.edit_error = Some(errors.join("\n"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn edit_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rename = matches!(self.edit, Some(EditModal::Rename(_)));
+        let global = matches!(self.edit, Some(EditModal::GlobalSpeedLimit));
+        let count = match &self.edit {
+            Some(EditModal::SpeedLimit(ids)) => ids.len(),
+            _ => 1,
+        };
+        deferred(div().absolute().inset_0().occlude().bg(rgba(0x000000a6)).flex().items_center().justify_center()
+            .child(scroll_area("edit-download-modal", &self.edit_scroll,
+                div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(16.))
+                .child(div().flex().items_center().justify_between()
+                    .child(label(if rename { "Rename download" } else if global { "Global speed limit" } else { "Speed limit" }, 18., TEXT).font_weight(FontWeight::MEDIUM))
+                    .child(icon_button("close-edit", Icon::Close).track_focus(&self.modal_close_focus)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_edit(window, cx)))))
+                .child(label(if rename { "Download name".to_owned() } else if global { "Shared limit in KiB/s".into() } else { format!("Limit per download (KiB/s) · {count} selected") }, 13., MUTED))
+                .child(div().h(px(42.)).flex().items_center().px(px(12.)).bg(rgb(BG)).border_1().border_color(rgb(0x50565c)).child(self.edit_input.clone()))
+                .when(!rename, |form| form.child(label(if global { "0 means unlimited; otherwise use at least 16 KiB/s. All downloads share this cap. FTP, video, torrent and Metalink transfers run one at a time while it is enabled." } else { "0 means unlimited. The limit is shared by all connections in each download. Torrent limits start at 16 KiB/s." }, 12., MUTED)))
+                .child(label("Active transfers pause briefly while the change is saved, then resume.", 12., MUTED))
+                .children(self.edit_error.as_ref().map(|error| label(error, 12., RED)))
+                .child(div().flex().justify_end().gap(px(10.))
+                    .child(button("cancel-edit", "Cancel", Icon::Close, false).track_focus(&self.modal_choose_focus)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_edit(window, cx))))
+                    .child(button("save-edit", if self.edit_saving { "Saving..." } else if rename { "Rename" } else { "Apply limit" }, Icon::Check, true)
+                        .track_focus(&self.modal_start_focus).when(self.edit_saving, |button| button.opacity(0.6))
+                        .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))))), window, cx.entity_id())
+                .w(px(560.)).max_w(relative(0.9)).max_h(relative(0.85)).border_1().border_color(rgb(0x44484c))
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_edit(window, cx))))
+        ).with_priority(2)
     }
 
     fn show_menu(
@@ -541,6 +901,13 @@ impl Strata {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Menu::Download(id) = menu {
+            if !self.checked.contains(&id) {
+                self.checked = [id].into_iter().collect();
+                self.selection_anchor = Some(id);
+            }
+            self.selected = Some(id);
+        }
         self.menu = Some((menu, position));
         self.menu_index = 0;
         self.menu_focus.focus(window);
@@ -558,6 +925,23 @@ impl Strata {
                 ("In progress", Icon::Play, MenuAction::Filter(View::Active)),
                 ("Completed", Icon::Check, MenuAction::Filter(View::Finished)),
                 ("Stopped", Icon::Pause, MenuAction::Filter(View::Paused)),
+            ],
+            Menu::Priority(id) => vec![
+                (
+                    "High",
+                    Icon::Arrow,
+                    MenuAction::SetPriority(id, Priority::High),
+                ),
+                (
+                    "Normal",
+                    Icon::Arrow,
+                    MenuAction::SetPriority(id, Priority::Normal),
+                ),
+                (
+                    "Low",
+                    Icon::Arrow,
+                    MenuAction::SetPriority(id, Priority::Low),
+                ),
             ],
             Menu::Download(id) => {
                 let Some(d) = self.downloads.iter().find(|d| d.id == id) else {
@@ -577,6 +961,11 @@ impl Strata {
                 }
                 items.push(("Open folder", Icon::Folder, MenuAction::Folder(id)));
                 items.push(("Copy download link", Icon::Copy, MenuAction::Copy(id)));
+                if d.status != Status::Deleting {
+                    items.push(("Rename", Icon::File, MenuAction::Rename(id)));
+                    items.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
+                    items.push(("Set priority", Icon::Arrow, MenuAction::Priority(id)));
+                }
                 if !matches!(
                     d.status,
                     Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
@@ -593,14 +982,49 @@ impl Strata {
 
     fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            MenuAction::Filter(view) => self.view = view,
-            MenuAction::Pause(id) => self.manager.pause(id),
-            MenuAction::Resume(id) => self.manager.resume(id),
-            MenuAction::Cancel(id) => self.manager.cancel(id),
+            MenuAction::Filter(view) => {
+                self.view = view;
+                self.checked.clear();
+                self.selected = None;
+                self.selection_anchor = None;
+            }
+            MenuAction::Pause(id) => {
+                for id in self.action_ids(id) {
+                    self.manager.pause(id);
+                }
+            }
+            MenuAction::Resume(id) => {
+                for id in self.action_ids(id) {
+                    self.manager.resume(id);
+                }
+            }
+            MenuAction::Cancel(id) => {
+                for id in self.action_ids(id) {
+                    self.manager.cancel(id);
+                }
+            }
             MenuAction::Delete(id) => {
-                self.manager.delete(id);
-                self.rates.remove(&id);
-                self.previous.remove(&id);
+                for id in self.action_ids(id) {
+                    self.manager.delete(id);
+                    self.rates.remove(&id);
+                    self.previous.remove(&id);
+                }
+            }
+            MenuAction::Rename(id) => {
+                self.open_edit(EditModal::Rename(id), window, cx);
+                return;
+            }
+            MenuAction::SpeedLimit(id) => {
+                self.open_edit(EditModal::SpeedLimit(self.action_ids(id)), window, cx);
+                return;
+            }
+            MenuAction::Priority(id) => {
+                let position = self.menu.map(|(_, position)| position).unwrap_or_default();
+                self.show_menu(Menu::Priority(id), position, window, cx);
+                return;
+            }
+            MenuAction::SetPriority(id, priority) => {
+                self.manager.set_priority(&self.action_ids(id), priority)
             }
             MenuAction::Folder(id) | MenuAction::Open(id) | MenuAction::Copy(id) => {
                 if let Some(d) = self.downloads.iter().find(|d| d.id == id) {
@@ -678,8 +1102,8 @@ impl Strata {
                         }))
                         .children(items.into_iter().enumerate().map(
                             |(i, (text, glyph, action))| {
-                                let chosen =
-                                    matches!(action, MenuAction::Filter(view) if self.view == view);
+                                let chosen = matches!(action, MenuAction::Filter(view) if self.view == view)
+                                    || matches!(action, MenuAction::SetPriority(id, priority) if self.action_ids(id).iter().all(|id| self.downloads.iter().any(|d| d.id == *id && d.priority == priority)));
                                 div()
                                     .id(ElementId::Name(format!("menu-item-{i}").into()))
                                     .h(px(36.))
@@ -723,13 +1147,7 @@ impl Strata {
         }
     }
 
-    fn queue(&mut self, cx: &mut Context<Self>) -> Div {
-        let title = match self.view {
-            View::Active => "In progress",
-            View::Finished => "Completed",
-            View::Paused => "Stopped",
-            _ => "All downloads",
-        };
+    fn queue(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let files = self.filtered(cx);
         div()
             .flex_1()
@@ -738,52 +1156,6 @@ impl Strata {
             .flex()
             .flex_col()
             .px(px(28.))
-            .pt(px(16.))
-            .gap(px(12.))
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(label(title, 23., TEXT).font_weight(FontWeight::SEMIBOLD))
-                            .child(label(format!("{}", files.len()), 13., FAINT)),
-                    )
-                    .child(
-                        button("pause-all", "Pause all", Icon::Pause, false).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.manager.pause_all();
-                                cx.notify();
-                            },
-                        )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(12.))
-                    .justify_between()
-                    .child(
-                        div()
-                            .w(px(260.))
-                            .h(px(36.))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .px(px(10.))
-                            .bg(rgb(SURFACE))
-                            .child(icon(Icon::Search, 16., FAINT))
-                            .child(self.search.clone()),
-                    )
-                    .child(label("Newest first", 12., FAINT)),
-            )
             .child(
                 div()
                     .flex_1()
@@ -794,8 +1166,37 @@ impl Strata {
                     .border_color(rgb(RULE))
                     .child(
                         table_row()
+                            .mr(px(BAR_WIDTH))
+                            .w_auto()
                             .h(px(32.))
                             .flex_shrink_0()
+                            .child(
+                                checkbox(
+                                    "check-all",
+                                    !files.is_empty()
+                                        && files.iter().all(|d| self.checked.contains(&d.id)),
+                                    files.iter().any(|d| self.checked.contains(&d.id))
+                                        && !files.iter().all(|d| self.checked.contains(&d.id)),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let ids = this
+                                            .filtered(cx)
+                                            .iter()
+                                            .map(|d| d.id)
+                                            .collect::<Vec<_>>();
+                                        if ids.iter().all(|id| this.checked.contains(id)) {
+                                            for id in ids {
+                                                this.checked.remove(&id);
+                                            }
+                                        } else {
+                                            this.checked.extend(ids);
+                                        }
+                                        this.selected = this.checked.iter().next_back().copied();
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                             .child(label("File name", 12., FAINT).flex_1().min_w_0())
                             .child(
                                 label("Size", 12., FAINT)
@@ -804,6 +1205,7 @@ impl Strata {
                                     .flex_shrink_0(),
                             )
                             .child(label("Status", 12., FAINT).w(px(100.)).flex_shrink_0())
+                            .child(label("Created", 12., FAINT).w(px(90.)).flex_shrink_0())
                             .child(label("Progress", 12., FAINT).w(px(132.)).flex_shrink_0())
                             .when(!self.compact, |d| {
                                 d.child(
@@ -822,46 +1224,65 @@ impl Strata {
                             .child(div().w(px(30.)).flex_shrink_0()),
                     )
                     .child(
-                        div()
-                            .id("download-list")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .when(files.is_empty(), |d| d.child(self.empty(cx)))
-                            .children(files.iter().map(|d| self.row(d, cx))),
+                        scroll_area(
+                            "download-list",
+                            &self.queue_scroll,
+                            div()
+                                .when(files.is_empty(), |d| d.child(self.empty(cx)))
+                                .children(files.iter().map(|d| self.row(d, cx))),
+                            window,
+                            cx.entity_id(),
+                        )
+                        .flex_1()
+                        .min_h_0(),
                     ),
             )
-            .child(
-                div()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_t_1()
-                    .border_color(rgb(RULE))
-                    .child(label(
-                        format!(
-                            "{} {}",
-                            files.len(),
-                            if files.len() == 1 {
-                                "download"
-                            } else {
-                                "downloads"
-                            }
-                        ),
-                        12.,
-                        FAINT,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(icon(Icon::Folder, 14., FAINT))
-                            .child(label(short_path(&self.directory), 12., FAINT).truncate()),
-                    ),
-            )
+    }
+
+    fn footer(&self, cx: &mut Context<Self>) -> Div {
+        let count = if self.view == View::Settings {
+            self.downloads.len()
+        } else {
+            self.filtered(cx).len()
+        };
+        div()
+            .h(px(32.))
+            .w_full()
+            .flex_shrink_0()
+            .px(px(28.))
+            .border_t_1()
+            .border_color(rgb(RULE))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(label(
+                format!(
+                    "{count} {}",
+                    if count == 1 { "download" } else { "downloads" }
+                ),
+                12.,
+                FAINT,
+            ))
+            .child(div().flex_1())
+            .child(icon(Icon::Folder, 14., FAINT))
+            .child(label(short_path(&self.directory), 12., FAINT).truncate())
+            .when(self.view != View::Settings, |footer| {
+                footer.child(
+                    icon_button(
+                        "toggle-details",
+                        if self.details_collapsed {
+                            Icon::ChevronUp
+                        } else {
+                            Icon::ChevronDown
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.finish_resize();
+                        this.details_collapsed = !this.details_collapsed;
+                        cx.notify();
+                    })),
+                )
+            })
     }
 
     fn empty(&self, cx: &mut Context<Self>) -> Div {
@@ -902,7 +1323,7 @@ impl Strata {
 
     fn row(&self, d: &Download, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = d.id;
-        let selected = self.selected == Some(id);
+        let selected = self.checked.contains(&id);
         let rate = self.rates.get(&id).copied().unwrap_or(0.);
         let color = status_color(d.status);
         table_row()
@@ -913,6 +1334,14 @@ impl Strata {
             .hover(|s| s.bg(rgb(SURFACE)))
             .focusable()
             .focus(|s| s.bg(rgb(RAISED)))
+            .child(
+                checkbox(format!("check-{id}"), selected, false).on_click(cx.listener(
+                    move |this, event: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.select_row(id, true, event.modifiers().shift, cx);
+                    },
+                )),
+            )
             .child(
                 div()
                     .flex_1()
@@ -938,6 +1367,12 @@ impl Strata {
                 label(d.status.label(), 12., color)
                     .w(px(100.))
                     .flex_shrink_0(),
+            )
+            .child(
+                label(crate::datetime::date(d.created), 12., MUTED)
+                    .w(px(90.))
+                    .flex_shrink_0()
+                    .truncate(),
             )
             .child(
                 div()
@@ -997,13 +1432,20 @@ impl Strata {
                     },
                 )),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = Some(id);
-                cx.notify();
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.show_menu(Menu::Download(id), event.position, window, cx);
+                }),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                let modifiers = event.modifiers();
+                this.select_row(id, modifiers.control, modifiers.shift, cx);
             }))
     }
 
-    fn add_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn add_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         deferred(
             div()
                 .absolute()
@@ -1014,21 +1456,24 @@ impl Strata {
                 .items_center()
                 .justify_center()
                 .child(
-                    div()
-                        .id("new-download-modal")
-                        .w(px(660.))
-                        .max_w(relative(0.9))
-                        .max_h(relative(0.85))
-                        .overflow_y_scroll()
-                        .border_1()
-                        .border_color(rgb(0x44484c))
-                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                            this.adding = false;
-                            this.error = None;
-                            this.focus.focus(window);
-                            cx.notify();
-                        }))
-                        .child(self.add_form(cx)),
+                    scroll_area(
+                        "new-download-modal",
+                        &self.add_scroll,
+                        self.add_form(cx),
+                        window,
+                        cx.entity_id(),
+                    )
+                    .w(px(660.))
+                    .max_w(relative(0.9))
+                    .max_h(relative(0.85))
+                    .border_1()
+                    .border_color(rgb(0x44484c))
+                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        this.adding = false;
+                        this.error = None;
+                        this.focus.focus(window);
+                        cx.notify();
+                    })),
                 ),
         )
         .with_priority(2)
@@ -1154,29 +1599,25 @@ impl Strata {
     }
 
     fn inspector(&self, cx: &mut Context<Self>) -> Div {
-        let selected = self.downloads.iter().find(|d| Some(d.id) == self.selected);
         let panel = div()
             .w_full()
             .min_w_0()
+            .h(px(self.details_height))
             .flex_shrink_0()
             .border_t_1()
             .border_color(rgb(RULE))
             .flex()
-            .flex_col();
-        let Some(d) = selected else {
-            return panel
-                .h(px(self.details_height))
-                .child(self.details_resizer(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_center()
-                        .px(px(28.))
-                        .child(label("Click on a download to view more info.", 13., MUTED)),
-                );
+            .flex_col()
+            .child(self.details_resizer(cx));
+        let Some(d) = self.downloads.iter().find(|d| Some(d.id) == self.selected) else {
+            return panel.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(label("Click on a download to view more info.", 13., MUTED)),
+            );
         };
         let id = d.id;
         let rate = self.rates.get(&id).copied().unwrap_or(0.);
@@ -1185,216 +1626,180 @@ impl Strata {
         } else {
             None
         };
-        let actions = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.))
-            .when(d.status == Status::Complete, |actions| {
-                actions.child(
-                    button(
-                        "open-file",
-                        if d.protocol.folder_output() {
-                            "Open download folder"
-                        } else {
-                            "Open file"
-                        },
-                        Icon::Arrow,
-                        true,
-                    )
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        if let Some(d) = this.downloads.iter().find(|d| d.id == id) {
-                            reveal(&d.path());
-                        }
-                    })),
-                )
-            })
-            .when(
-                matches!(d.status, Status::Failed | Status::Paused),
-                |actions| {
-                    actions.child(
-                        button("resume-selected", "Resume download", Icon::Play, true).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.manager.resume(id);
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                },
-            )
-            .when(d.status.active() || d.status == Status::Queued, |actions| {
-                actions.child(
-                    button("pause-selected", "Pause download", Icon::Pause, true).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.manager.pause(id);
-                            cx.notify();
-                        }),
-                    ),
-                )
-            })
-            .when(
-                !matches!(
-                    d.status,
-                    Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
-                ),
-                |actions| {
-                    actions.child(
-                        button("cancel-selected", "Cancel transfer", Icon::Close, false).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.manager.cancel(id);
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                },
-            );
         panel
-            .h(px(self.details_height))
-            .child(self.details_resizer(cx))
             .child(
                 div()
-                    .h(px(44.))
-                    .flex_shrink_0()
                     .px(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(RULE))
-                    .child(label("Transfer details", 13., MUTED))
-                    .child(actions),
+                    .py(px(8.))
+                    .flex_shrink_0()
+                    .child(segmented_progress(d)),
             )
-            .child(div().px(px(28.)).py(px(12.)).child(segmented_progress(d)))
             .child(
                 div()
-                    .id("details-scroll")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .px(px(28.))
+                    .py(px(8.))
+                    .flex()
+                    .gap(px(28.))
                     .child(
                         div()
-                            .p(px(20.))
-                            .px(px(28.))
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_start()
-                            .gap(px(28.))
+                            .flex_col()
+                            .gap(px(5.))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(10.))
-                                    .child(
-                                        label(d.name.clone(), 15., TEXT)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .truncate(),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(label(
-                                                d.status.label(),
-                                                12.,
-                                                status_color(d.status),
-                                            ))
-                                            .child(label(
-                                                if d.total.is_some() {
-                                                    format!("{:.1}%", d.fraction() * 100.)
-                                                } else {
-                                                    "—".into()
-                                                },
-                                                14.,
-                                                TEXT,
-                                            )),
-                                    )
-                                    .child(label(
-                                        format!(
-                                            "{} of {}",
-                                            bytes(d.downloaded),
-                                            d.total
-                                                .map(bytes)
-                                                .unwrap_or_else(|| "unknown size".into())
-                                        ),
-                                        12.,
-                                        MUTED,
-                                    ))
-                                    .child(label(
-                                        eta.map(|eta| format!("{eta} left"))
-                                            .unwrap_or_else(|| "—".into()),
-                                        12.,
-                                        FAINT,
-                                    ))
-                                    .children(
-                                        d.error.as_ref().map(|error| {
-                                            label(error, 12., RED).line_height(px(20.))
-                                        }),
-                                    ),
+                                label(&d.name, 15., TEXT)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .truncate(),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(10.))
-                                    .child(detail_line("Protocol", d.protocol.label()))
-                                    .child(detail_line("Source", &d.host()))
-                                    .child(detail_line(
-                                        "Destination",
-                                        &d.path().display().to_string(),
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .gap(px(8.))
-                                            .child(
-                                                button(
-                                                    "copy-link",
-                                                    "Copy download link",
-                                                    Icon::Copy,
-                                                    false,
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if let Some(d) =
-                                                        this.downloads.iter().find(|d| d.id == id)
-                                                    {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(
-                                                                d.url.clone(),
-                                                            ),
-                                                        );
-                                                    }
-                                                })),
-                                            )
-                                            .child(
-                                                button(
-                                                    "show-file",
-                                                    "Open folder",
-                                                    Icon::Folder,
-                                                    false,
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if let Some(d) =
-                                                        this.downloads.iter().find(|d| d.id == id)
-                                                    {
-                                                        reveal(&d.directory);
-                                                    }
-                                                    cx.notify();
-                                                })),
-                                            ),
+                                label(
+                                    format!(
+                                        "{} · {:.1}% · {} of {}",
+                                        d.status.label(),
+                                        d.fraction() * 100.,
+                                        bytes(d.downloaded),
+                                        d.total.map(bytes).unwrap_or_else(|| "unknown size".into())
                                     ),
+                                    12.,
+                                    status_color(d.status),
+                                )
+                                .truncate(),
+                            )
+                            .child(
+                                label(
+                                    format!(
+                                        "{} · {}",
+                                        if rate > 0. {
+                                            format!("{}/s", bytes(rate as u64))
+                                        } else {
+                                            "—".into()
+                                        },
+                                        eta.map(|eta| format!("{eta} left"))
+                                            .unwrap_or_else(|| "No ETA".into())
+                                    ),
+                                    12.,
+                                    MUTED,
+                                )
+                                .truncate(),
+                            )
+                            .children(
+                                d.error
+                                    .as_ref()
+                                    .map(|error| label(error, 12., RED).truncate()),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.))
+                            .child(detail_line("Protocol", d.protocol.label()))
+                            .child(detail_line("Source", &d.host()))
+                            .child(detail_line(
+                                "Completed at",
+                                &d.completed_at
+                                    .map(crate::datetime::date_time)
+                                    .unwrap_or_else(|| "—".into()),
+                            ))
+                            .child(detail_line("Destination", &d.path().display().to_string()))
+                            .child(detail_line(
+                                "Priority / limit",
+                                &format!(
+                                    "{} / {}",
+                                    d.priority.label(),
+                                    if d.speed_limit == 0 {
+                                        "Unlimited".into()
+                                    } else {
+                                        format!("{}/s", bytes(d.speed_limit))
+                                    }
+                                ),
+                            )),
                     ),
             )
     }
 
-    fn settings(&self, cx: &mut Context<Self>) -> Div {
-        div().flex_1().min_h_0().min_w_0().child(div().id("settings-scroll").size_full().overflow_y_scroll().child(div().p(px(32.)).flex().flex_col().gap(px(24.))
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_checking {
+            return;
+        }
+        self.update_checking = true;
+        self.update_available = None;
+        self.update_notice = None;
+        let check = cx
+            .background_executor()
+            .spawn(async { strata::updates::check() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = check.await;
+            let _ = this.update(cx, |this, cx| {
+                this.update_checking = false;
+                match result {
+                    Ok(Some(update)) => {
+                        this.update_notice =
+                            Some(format!("Version {} is available.", update.version));
+                        this.update_available = Some(update);
+                    }
+                    Ok(None) => {
+                        this.update_notice = Some("No newer stable version is available.".into())
+                    }
+                    Err(error) => {
+                        this.update_notice = Some(format!("Could not check for updates: {error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn download_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = &self.update_available else {
+            return;
+        };
+        match self.manager.add(
+            &update.installer_url,
+            self.directory.clone(),
+            self.connections,
+        ) {
+            Ok(id) => {
+                self.update_notice = Some("Installer added to your downloads. When it finishes, quit through the tray menu, then run the installer.".into());
+                self.update_available = None;
+                self.selected = Some(id);
+                self.view = View::All;
+                self.refresh();
+            }
+            Err(error) => {
+                self.update_notice = Some(format!("Could not download the update: {error:#}"))
+            }
+        }
+        cx.notify();
+    }
+
+    fn settings(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let content = div().p(px(32.)).flex().flex_col().gap(px(24.))
             .child(label("Settings", 24., TEXT).font_weight(FontWeight::SEMIBOLD))
-            .child(label("A few good defaults. The rest is automatic.", 14., MUTED))
+            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+                .child(label("Global speed limit", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label({ let limit = self.manager.settings.lock().unwrap().speed_limit; if limit == 0 { "Unlimited".into() } else { format!("{}/s shared across all downloads", bytes(limit)) } }, 13., MUTED))
+                .child(button("global-speed-limit", "Set global speed limit", Icon::Settings, false)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_edit(EditModal::GlobalSpeedLimit, window, cx)))))
+            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+                .child(label("App updates", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label(format!("Installed version {}", env!("CARGO_PKG_VERSION")), 13., MUTED))
+                .child(label("Download stable updates from GitHub. After the download finishes, quit through the tray menu and run the installer.", 13., MUTED).max_w(px(620.)))
+                .child(div().flex().gap(px(12.))
+                    .child(button("check-updates", if self.update_checking { "Checking GitHub..." } else { "Check for updates" }, Icon::Arrow, false)
+                        .when(self.update_checking, |button| button.opacity(0.6))
+                        .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))))
+                    .when(self.update_available.is_some(), |row| row.child(
+                        button("download-update", "Download update", Icon::Download, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))))))
+                .children(self.update_notice.as_ref().map(|message| label(message, 12., MUTED))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Connections & authentication", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("Proxy settings apply to HTTP, HTTPS, WebDAV, Metalink HTTP mirrors, and video transfers. FTP, SFTP, and torrent peers use direct connections. URL passwords are protected by Windows.", 13., MUTED).max_w(px(620.)))
@@ -1434,7 +1839,17 @@ impl Strata {
                 .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
             .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))
             .when(self.tray.is_some(), |view| view.child(label("Closing the window keeps downloads running in the system tray. Right-click the tray icon and choose Quit 101 Downloader to exit.", 12., FAINT)))
-        ))
+        ;
+        scroll_area(
+            "settings-scroll",
+            &self.settings_scroll,
+            content,
+            window,
+            cx.entity_id(),
+        )
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
     }
 }
 
@@ -1455,7 +1870,6 @@ impl Render for Strata {
             })
             .text_size(px(14.))
             .line_height(px(20.))
-            .track_focus(&self.focus)
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -1484,6 +1898,50 @@ impl Render for Strata {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.edit.is_some() {
+                    match key {
+                        "escape" => this.close_edit(window, cx),
+                        "enter" => {
+                            if this.edit_input.focus_handle(cx).is_focused(window)
+                                || this.modal_start_focus.is_focused(window)
+                            {
+                                this.save_edit(window, cx);
+                            }
+                        }
+                        "tab" => {
+                            let handles = [
+                                this.edit_input.focus_handle(cx),
+                                this.modal_choose_focus.clone(),
+                                this.modal_start_focus.clone(),
+                                this.modal_close_focus.clone(),
+                            ];
+                            let index = handles
+                                .iter()
+                                .position(|handle| handle.is_focused(window))
+                                .unwrap_or(0);
+                            let next = if event.keystroke.modifiers.shift {
+                                (index + handles.len() - 1) % handles.len()
+                            } else {
+                                (index + 1) % handles.len()
+                            };
+                            handles[next].focus(window);
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if event.keystroke.modifiers.control
+                    && key == "a"
+                    && !this.adding
+                    && !this.search.focus_handle(cx).is_focused(window)
+                {
+                    this.checked = this.filtered(cx).iter().map(|d| d.id).collect();
+                    this.selected = this.checked.iter().next_back().copied();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if event.keystroke.modifiers.control && key == "n" {
                     this.show_add(window, cx);
                     cx.stop_propagation();
@@ -1538,42 +1996,102 @@ impl Render for Strata {
                 }
             }))
             .child(self.titlebar(window, cx))
-            .child(
-                div().flex_1().min_h_0().w_full().flex().child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .when(self.view == View::Settings, |d| {
-                            d.child(self.topbar(cx)).child(self.settings(cx))
-                        })
-                        .when(self.view != View::Settings, |d| {
-                            d.child(self.topbar(cx))
-                                .child(self.queue(cx))
-                                .child(self.inspector(cx))
-                        })
-                        .children(
-                            self.manager
-                                .persistence_error
-                                .lock()
-                                .unwrap()
-                                .clone()
-                                .map(|e| label(e, 12., RED).px(px(28.)).py(px(10.))),
-                        )
-                        .children(
-                            self.tray_error
-                                .as_ref()
-                                .map(|message| label(message, 12., AMBER).px(px(28.)).py(px(10.))),
-                        ),
-                ),
+            .children(
+                self.update_available
+                    .as_ref()
+                    .filter(|_| self.view != View::Settings)
+                    .map(|update| {
+                        div()
+                            .w_full()
+                            .flex_shrink_0()
+                            .px(px(28.))
+                            .py(px(12.))
+                            .bg(rgb(SURFACE))
+                            .border_b_1()
+                            .border_color(rgb(RULE))
+                            .flex()
+                            .items_center()
+                            .gap(px(16.))
+                            .child(
+                                label(
+                                    format!("101 Downloader {} is available.", update.version),
+                                    13.,
+                                    TEXT,
+                                )
+                                .flex_1(),
+                            )
+                            .child(
+                                button(
+                                    "offer-download-update",
+                                    "Download update",
+                                    Icon::Download,
+                                    true,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))),
+                            )
+                    }),
             )
+            .child(
+                // Focusable ancestors consume native caption mouse-down events in GPUI.
+                div()
+                    .track_focus(&self.focus)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(self.view == View::Settings, |d| {
+                                d.child(self.topbar(cx)).child(self.settings(window, cx))
+                            })
+                            .when(self.view != View::Settings, |d| {
+                                d.child(self.topbar(cx))
+                                    .child(self.queue(window, cx))
+                                    .when(!self.details_collapsed, |body| {
+                                        body.child(self.inspector(cx))
+                                    })
+                            })
+                            .children(
+                                self.manager
+                                    .persistence_error
+                                    .lock()
+                                    .unwrap()
+                                    .clone()
+                                    .map(|e| label(e, 12., RED).px(px(28.)).py(px(10.))),
+                            )
+                            .children(
+                                self.tray_error.as_ref().map(|message| {
+                                    label(message, 12., AMBER).px(px(28.)).py(px(10.))
+                                }),
+                            ),
+                    ),
+            )
+            .child(self.footer(cx))
             .children(
                 self.menu
                     .map(|(menu, position)| self.popup_menu(menu, position, cx)),
             )
-            .children(self.adding.then(|| self.add_modal(cx)))
+            .children(self.adding.then(|| self.add_modal(window, cx)))
+            .children(self.edit.as_ref().map(|_| self.edit_modal(window, cx)))
+    }
+}
+
+struct ActionTooltip(&'static str);
+
+impl Render for ActionTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .p(px(8.))
+            .bg(rgb(RAISED))
+            .border_1()
+            .border_color(rgb(MUTED))
+            .font_family("Segoe UI")
+            .child(label(self.0, 12., TEXT))
     }
 }
 
@@ -1594,6 +2112,83 @@ fn table_row() -> Div {
         .px(px(14.))
         .border_b_1()
         .border_color(rgb(RULE))
+}
+
+fn checkbox(id: impl Into<SharedString>, checked: bool, mixed: bool) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(id.into()))
+        .size(px(28.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .focusable()
+        .focus(|style| style.bg(rgb(RAISED)))
+        .child(
+            div()
+                .size(px(16.))
+                .border_1()
+                .border_color(rgb(if checked || mixed { TEXT } else { MUTED }))
+                .bg(rgb(if checked || mixed { TEXT } else { BG }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(checked, |box_| box_.child(icon(Icon::Check, 12., BG)))
+                .when(mixed && !checked, |box_| {
+                    box_.child(div().w(px(8.)).h(px(2.)).bg(rgb(BG)))
+                }),
+        )
+}
+
+fn select_download(
+    checked: &mut BTreeSet<u64>,
+    anchor: &mut Option<u64>,
+    visible: &[u64],
+    id: u64,
+    control: bool,
+    shift: bool,
+) {
+    if shift
+        && let Some((start, end)) = anchor
+            .and_then(|anchor| visible.iter().position(|candidate| *candidate == anchor))
+            .zip(visible.iter().position(|candidate| *candidate == id))
+    {
+        if !control {
+            checked.clear();
+        }
+        checked.extend(&visible[start.min(end)..=start.max(end)]);
+        return;
+    }
+    if control {
+        if !checked.remove(&id) {
+            checked.insert(id);
+        }
+    } else {
+        checked.clear();
+        checked.insert(id);
+    }
+    *anchor = Some(id);
+}
+
+fn filename_selection_end(name: &str, folder: bool) -> usize {
+    if folder {
+        name.len()
+    } else {
+        std::path::Path::new(name)
+            .file_stem()
+            .map_or(name.len(), |stem| stem.len())
+    }
+}
+
+fn parse_speed_limit(value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_mul(1024))
+        .filter(|value| *value <= u32::MAX as u64)
+        .ok_or_else(|| "Enter a whole number from 0 to 4194303 KiB/s. Use 0 for unlimited.".into())
 }
 
 fn transport_input(title: &str, input: Entity<TextInput>) -> Div {
@@ -1618,10 +2213,11 @@ fn transport_input(title: &str, input: Entity<TextInput>) -> Div {
 fn detail_line(title: &str, value: &str) -> Div {
     div()
         .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(label(title, 11., FAINT))
-        .child(label(value, 12., MUTED).line_height(px(20.)))
+        .items_center()
+        .gap(px(10.))
+        .min_w_0()
+        .child(label(title, 12., FAINT).w(px(94.)).flex_shrink_0())
+        .child(label(value, 12., MUTED).flex_1().min_w_0().truncate())
 }
 
 fn button(id: impl Into<SharedString>, text: &str, glyph: Icon, primary: bool) -> Stateful<Div> {
@@ -1724,7 +2320,7 @@ fn clamp_details_height(requested: f32, viewport: f32) -> f32 {
     } else {
         240.
     };
-    requested.clamp(120., (viewport - 460.).max(120.))
+    requested.clamp(180., (viewport - 460.).max(180.))
 }
 
 fn segment_layout(parts: &[strata::engine::Part], known_size: bool) -> Vec<(f32, f32)> {
@@ -1898,6 +2494,8 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
                     vec![(5., 19.), (19., 5.)],
                     vec![(7., 5.), (19., 5.), (19., 17.)],
                 ],
+                Icon::ChevronDown => vec![vec![(5., 8.), (12., 15.), (19., 8.)]],
+                Icon::ChevronUp => vec![vec![(5., 16.), (12., 9.), (19., 16.)]],
                 Icon::Link => vec![
                     vec![
                         (10., 6.),
@@ -1969,6 +2567,45 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use super::{filename_selection_end, parse_speed_limit, select_download};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn selection_supports_toggle_ranges_and_display_order() {
+        let visible = [50, 40, 30, 20, 10];
+        let mut selected = BTreeSet::new();
+        let mut anchor = None;
+        select_download(&mut selected, &mut anchor, &visible, 40, false, false);
+        select_download(&mut selected, &mut anchor, &visible, 10, false, true);
+        assert_eq!(selected, [40, 30, 20, 10].into_iter().collect());
+        select_download(&mut selected, &mut anchor, &visible, 30, true, false);
+        assert_eq!(selected, [40, 20, 10].into_iter().collect());
+        select_download(&mut selected, &mut anchor, &visible, 50, true, true);
+        assert_eq!(selected, [50, 40, 30, 20, 10].into_iter().collect());
+        select_download(&mut selected, &mut anchor, &visible, 20, false, false);
+        assert_eq!(selected, [20].into_iter().collect());
+    }
+
+    #[test]
+    fn rename_selection_excludes_only_the_file_extension_and_handles_unicode() {
+        for (name, expected) in [
+            ("report.pdf", "report"),
+            ("résumé.tar.gz", "résumé.tar"),
+            ("README", "README"),
+            (".gitignore", ".gitignore"),
+        ] {
+            assert_eq!(&name[..filename_selection_end(name, false)], expected);
+        }
+        assert_eq!(
+            filename_selection_end("folder.with.dots", true),
+            "folder.with.dots".len()
+        );
+        assert_eq!(parse_speed_limit("512").unwrap(), 512 * 1024);
+        assert_eq!(parse_speed_limit("0").unwrap(), 0);
+        for invalid in ["", "-1", "1.5", "4194304", "99999999999999999999999"] {
+            assert!(parse_speed_limit(invalid).is_err());
+        }
+    }
     use super::{clamp_details_height, remaining_time, segment_layout};
     use strata::engine::Part;
 
@@ -2026,7 +2663,7 @@ mod tests {
     fn resizing_preserves_space_for_the_table_and_handles_saved_invalid_values() {
         assert_eq!(clamp_details_height(900., 700.), 240.);
         assert_eq!(clamp_details_height(900., 1000.), 540.);
-        assert_eq!(clamp_details_height(-100., 700.), 120.);
+        assert_eq!(clamp_details_height(-100., 700.), 180.);
         assert_eq!(clamp_details_height(f32::NAN, 880.), 240.);
     }
 

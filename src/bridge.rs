@@ -379,6 +379,17 @@ mod platform {
     }
 
     pub async fn send(request: &Request, history: &Path, launch: bool) -> Result<Reply> {
+        if matches!(
+            request,
+            Request::Open | Request::Download { .. } | Request::Transfer { .. }
+        ) {
+            // Let a foreground browser or CLI pass its activation permission to the app.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                    windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+                );
+            }
+        }
         let (name, _) = pipe_name(history)?;
         let mut launched = false;
         let start = std::time::Instant::now();

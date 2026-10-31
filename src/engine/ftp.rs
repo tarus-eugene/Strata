@@ -21,6 +21,9 @@ impl Manager {
                 tools::config_value(&format!("{username}:{password}"))
             );
         }
+        if job.effective_speed_limit() > 0 {
+            config += &format!("limit-rate = {}\n", job.effective_speed_limit());
+        }
         let probe = tools::run(
             job,
             &curl,

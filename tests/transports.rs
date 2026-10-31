@@ -158,6 +158,14 @@ fn ftp_anonymous_authenticated_and_rest_resume_are_byte_exact() {
     let directory = tempfile::tempdir().unwrap();
     let history = directory.path().join("history.json");
     let manager = Manager::new(history.clone()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(manager.set_global_speed_limit(2 * 1024 * 1024))
+        .unwrap()
+        .unwrap();
     let source = server
         .address
         .replace("ftp://", "ftp://alice:ftp-test-password@")

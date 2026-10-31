@@ -272,11 +272,14 @@ impl Manager {
                         error: None,
                         connections: parent.connections,
                         created: parent.created,
+                        completed_at: None,
                         referrer: None,
                         protocol: source.protocol,
                         options: source.options.clone(),
                         preserve_name: true,
                         owns_output: false,
+                        priority: parent.priority,
+                        speed_limit: parent.speed_limit,
                     });
                 data.id = parent.id;
                 data.directory = work.clone();
@@ -285,6 +288,7 @@ impl Manager {
                 data.owns_output = false;
                 data.protocol = source.protocol;
                 data.options = source.options;
+                data.speed_limit = parent.speed_limit;
                 if data.path().exists() {
                     fs::remove_file(data.path())?;
                 }
@@ -294,6 +298,9 @@ impl Manager {
                     running: AtomicBool::new(true),
                     name_hint: Mutex::new(None),
                     deleting: AtomicBool::new(false),
+                    editing: AtomicBool::new(false),
+                    limiter: job.limiter.clone(),
+                    global_limiter: job.global_limiter.clone(),
                 });
                 let result = {
                     let transfer = async {

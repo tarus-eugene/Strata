@@ -8,7 +8,10 @@ use windows::{
             ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
             WPARAM,
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Threading::{AttachThreadInput, GetCurrentThreadId},
+        },
         UI::{Shell::*, WindowsAndMessaging::*},
     },
     core::{PCWSTR, w},
@@ -87,10 +90,7 @@ impl Tray {
                     LR_DEFAULTSIZE | LR_SHARED,
                 )?;
                 let mut tip = [0u16; 128];
-                for (target, ch) in tip
-                    .iter_mut()
-                    .zip("101 Downloader - Download manager".encode_utf16())
-                {
+                for (target, ch) in tip.iter_mut().zip("101 Downloader".encode_utf16()) {
                     *target = ch;
                 }
                 state.data.set(NOTIFYICONDATAW {
@@ -172,7 +172,17 @@ impl TrayState {
                     SW_SHOW
                 },
             );
+            let foreground = GetForegroundWindow();
+            let foreground_thread = GetWindowThreadProcessId(foreground, None);
+            let current_thread = GetCurrentThreadId();
+            let attached = foreground_thread != 0
+                && foreground_thread != current_thread
+                && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+            let _ = BringWindowToTop(self.main);
             let _ = SetForegroundWindow(self.main);
+            if attached {
+                let _ = AttachThreadInput(current_thread, foreground_thread, false);
+            }
         }
     }
 
@@ -323,6 +333,7 @@ mod tests {
             pump();
             assert!(!tray.is_hidden());
             assert!(IsWindowVisible(main).as_bool());
+            assert_eq!(GetForegroundWindow(), main);
             tray.hide();
             pump();
             assert!(tray.is_hidden());

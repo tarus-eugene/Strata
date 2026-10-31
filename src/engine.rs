@@ -21,6 +21,7 @@ use tokio::{
 use url::Url;
 
 mod chunks;
+mod controls;
 mod deletion;
 mod ftp;
 mod metalink;
@@ -74,6 +75,29 @@ impl Status {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl Priority {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Normal => "Normal",
+            Self::High => "High",
+        }
+    }
+}
+
+pub enum DownloadChange {
+    Rename(String),
+    SpeedLimit(u64),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Part {
     pub start: u64,
@@ -108,6 +132,8 @@ pub struct Download {
     pub error: Option<String>,
     pub connections: usize,
     pub created: u64,
+    #[serde(default)]
+    pub completed_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
     #[serde(default)]
@@ -118,6 +144,10 @@ pub struct Download {
     pub preserve_name: bool,
     #[serde(default)]
     pub owns_output: bool,
+    #[serde(default)]
+    pub priority: Priority,
+    #[serde(default)]
+    pub speed_limit: u64,
 }
 
 impl Download {
@@ -155,6 +185,8 @@ pub struct Settings {
     pub transport: TransferOptions,
     #[serde(default = "default_details_height")]
     pub details_height: f32,
+    #[serde(default)]
+    pub speed_limit: u64,
 }
 
 fn default_details_height() -> f32 {
@@ -172,6 +204,7 @@ impl Default for Settings {
             connections: 8,
             transport: TransferOptions::default(),
             details_height: default_details_height(),
+            speed_limit: 0,
         }
     }
 }
@@ -182,6 +215,9 @@ struct Job {
     running: AtomicBool,
     name_hint: Mutex<Option<naming::FilenameHint>>,
     deleting: AtomicBool,
+    editing: AtomicBool,
+    limiter: Arc<controls::RateLimiter>,
+    global_limiter: Arc<controls::RateLimiter>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -201,6 +237,10 @@ pub struct Manager {
     pub persistence_error: Mutex<Option<String>>,
     pub browser_error: Mutex<Option<String>>,
     pub show_requested: AtomicBool,
+    global_limiter: Arc<controls::RateLimiter>,
+    controls_lock: tokio::sync::Mutex<()>,
+    global_editing: AtomicBool,
+    quitting: AtomicBool,
     #[cfg(feature = "torrent-native")]
     torrent_session: tokio::sync::OnceCell<Arc<librqbit::Session>>,
 }
@@ -219,6 +259,7 @@ impl Manager {
         let (settings, downloads) = loaded
             .map(|h| (h.settings, h.downloads))
             .unwrap_or_default();
+        let global_limiter = Arc::new(controls::RateLimiter::new(settings.speed_limit));
         let jobs = downloads
             .into_iter()
             .map(|mut data| {
@@ -236,11 +277,14 @@ impl Manager {
                     data.status = Status::Paused;
                 }
                 Arc::new(Job {
+                    limiter: Arc::new(controls::RateLimiter::new(data.speed_limit)),
+                    global_limiter: global_limiter.clone(),
                     data: Mutex::new(data),
                     control: Arc::new(AtomicU8::new(PAUSE)),
                     running: AtomicBool::new(false),
                     name_hint: Mutex::new(None),
                     deleting: AtomicBool::new(false),
+                    editing: AtomicBool::new(false),
                 })
             })
             .collect();
@@ -254,7 +298,7 @@ impl Manager {
         let client = Client::builder()
             .pool_max_idle_per_host(16)
             .pool_idle_timeout(Duration::from_secs(90))
-            .user_agent("101Downloader/0.2")
+            .user_agent(concat!("101Downloader/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -270,6 +314,10 @@ impl Manager {
             persistence_error: Mutex::new(None),
             browser_error: Mutex::new(None),
             show_requested: AtomicBool::new(false),
+            global_limiter,
+            controls_lock: tokio::sync::Mutex::new(()),
+            global_editing: AtomicBool::new(false),
+            quitting: AtomicBool::new(false),
             #[cfg(feature = "torrent-native")]
             torrent_session: tokio::sync::OnceCell::new(),
         });
@@ -360,6 +408,10 @@ impl Manager {
         referrer: Option<String>,
         options: TransferOptions,
     ) -> Result<u64> {
+        ensure!(
+            !self.quitting.load(Ordering::SeqCst),
+            "101 Downloader is quitting. Open it again and retry."
+        );
         let defaults = self.settings.lock().unwrap().transport.clone();
         let explicit_proxy = options.proxy.is_some();
         let mut options = options.with_defaults(&defaults);
@@ -438,16 +490,22 @@ impl Manager {
                 error: None,
                 connections: connections.clamp(1, 16),
                 created: id / 1_000_000,
+                completed_at: None,
                 referrer,
                 protocol: source.protocol,
                 options: source.options,
                 preserve_name,
                 owns_output: false,
+                priority: Priority::Normal,
+                speed_limit: 0,
             }),
             control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
             name_hint: Mutex::new(None),
             deleting: AtomicBool::new(false),
+            editing: AtomicBool::new(false),
+            limiter: Arc::new(controls::RateLimiter::new(0)),
+            global_limiter: self.global_limiter.clone(),
         });
         jobs.push(job.clone());
         drop(jobs);
@@ -460,13 +518,20 @@ impl Manager {
             bail!(error);
         }
         self.launch(job);
+        self.show_requested.store(true, Ordering::SeqCst);
         Ok(id)
     }
 
     pub fn resume(self: &Arc<Self>, id: u64) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(job) = self.find(id) {
             let mut data = job.data.lock().unwrap();
-            if job.running.load(Ordering::SeqCst) || job.deleting.load(Ordering::SeqCst) {
+            if job.running.load(Ordering::SeqCst)
+                || job.deleting.load(Ordering::SeqCst)
+                || job.editing.load(Ordering::SeqCst)
+            {
                 return;
             }
             if matches!(data.status, Status::Complete | Status::Cancelled) {
@@ -515,16 +580,15 @@ impl Manager {
     }
 
     pub fn shutdown(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
         self.pause_all();
         // Wait for writes to settle before the process exits so part lengths remain resumable.
         for _ in 0..50 {
-            if self
-                .jobs
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|j| !j.running.load(Ordering::SeqCst) && !j.deleting.load(Ordering::SeqCst))
-            {
+            if self.jobs.lock().unwrap().iter().all(|j| {
+                !j.running.load(Ordering::SeqCst)
+                    && !j.deleting.load(Ordering::SeqCst)
+                    && !j.editing.load(Ordering::SeqCst)
+            }) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -534,6 +598,10 @@ impl Manager {
 
     pub fn persist(&self) {
         let _guard = self.save_lock.lock().unwrap();
+        self.persist_locked();
+    }
+
+    fn persist_locked(&self) {
         let result = (|| -> Result<()> {
             let parent = self.history.parent().context("Missing history folder")?;
             fs::create_dir_all(parent)?;
@@ -591,9 +659,46 @@ impl Manager {
     }
 
     async fn execute(&self, job: &Arc<Job>) -> Result<()> {
-        let _permit = tokio::select! {
-            permit = self.slots.acquire() => permit?,
-            _ = stopped(job) => bail!("Transfer stopped"),
+        let _permit = loop {
+            check_running(job)?;
+            let permit = {
+                let jobs = self.jobs.lock().unwrap();
+                let next = jobs
+                    .iter()
+                    .filter_map(|candidate| {
+                        let d = candidate.data.lock().unwrap();
+                        (d.status == Status::Queued
+                            && candidate.control.load(Ordering::SeqCst) == RUN)
+                            .then_some((std::cmp::Reverse(d.priority), d.id))
+                    })
+                    .min();
+                if !self.global_editing.load(Ordering::SeqCst)
+                    && next.is_some_and(|(_, id)| id == job.data.lock().unwrap().id)
+                {
+                    let protocol = job.data.lock().unwrap().protocol;
+                    // shortcut: global-capped external jobs run alone; use shared streaming when concurrency is needed.
+                    let slots = if self.settings.lock().unwrap().speed_limit > 0
+                        && !matches!(protocol, Protocol::Http | Protocol::WebDav | Protocol::Sftp)
+                    {
+                        3
+                    } else {
+                        1
+                    };
+                    self.slots
+                        .try_acquire_many(slots)
+                        .ok()
+                        .inspect(|_| job.data.lock().unwrap().status = Status::Connecting)
+                } else {
+                    None
+                }
+            };
+            if let Some(permit) = permit {
+                break permit;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                _ = stopped(job) => bail!("Transfer stopped"),
+            }
         };
         check_running(job)?;
         job.data.lock().unwrap().status = Status::Connecting;
@@ -616,7 +721,7 @@ impl Manager {
             Ok(Client::builder()
                 .pool_max_idle_per_host(16)
                 .pool_idle_timeout(Duration::from_secs(90))
-                .user_agent("101Downloader/0.2")
+                .user_agent(concat!("101Downloader/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(Duration::from_secs(15))
                 .read_timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::limited(10))
@@ -755,6 +860,7 @@ impl Manager {
             let mut data = job.data.lock().unwrap();
             data.total = Some(data.downloaded);
             data.status = Status::Complete;
+            data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
             data.owns_output = true;
             data.error = None;
         }
@@ -916,6 +1022,10 @@ async fn transfer_part(
         if d.ranged && received + chunk.len() as u64 > part.len() {
             file.flush().await?;
             bail!("Server sent more bytes than requested");
+        }
+        if let Err(error) = job.throttle(chunk.len()).await {
+            file.flush().await?;
+            return Err(error);
         }
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;

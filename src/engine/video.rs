@@ -15,13 +15,20 @@ impl Manager {
         fs::create_dir_all(&temporary)?;
         let mut config = format!(
             "--no-playlist\n--continue\n--no-overwrites\n--no-simulate\n--windows-filenames\n--no-cache-dir\n--quiet\n--no-warnings\n--progress\n--newline\n--concurrent-fragments {}\n--paths {}\n--paths {}\n--output {}\n--progress-template {}\n--print {}\n",
-            d.connections,
+            if job.effective_speed_limit() > 0 {
+                1
+            } else {
+                d.connections
+            },
             tools::config_value(&format!("home:{}", content.display())),
             tools::config_value(&format!("temp:{}", temporary.display())),
             tools::config_value("%(title).120B [%(id)s].%(ext)s"),
             tools::config_value("download:STRATA_PROGRESS:%(progress)j"),
             tools::config_value("after_move:STRATA_FILE:%(filepath)j")
         );
+        if job.effective_speed_limit() > 0 {
+            config += &format!("--limit-rate {}\n", job.effective_speed_limit());
+        }
         if let Ok(ffmpeg) = tools::executable("ffmpeg") {
             config += &format!(
                 "--ffmpeg-location {}\n",

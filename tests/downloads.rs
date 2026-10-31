@@ -200,8 +200,14 @@ fn wait(
         if predicate(&data) {
             return data;
         }
+        // Bundled media startup/probing needs more time when Windows runs the suite in parallel.
+        let timeout = if data.protocol == strata::protocol::Protocol::Video {
+            45
+        } else {
+            15
+        };
         assert!(
-            start.elapsed() < Duration::from_secs(15),
+            start.elapsed() < Duration::from_secs(timeout),
             "Timed out: {:?}, error {:?}",
             data.status,
             data.error
@@ -281,6 +287,72 @@ fn downloads_eight_ranges_concurrently_and_assembles_exact_bytes() {
     );
     assert_eq!(std::fs::read(d.path()).unwrap(), *server.bytes);
     assert!(!d.parts_dir().exists());
+    assert!(
+        d.completed_at
+            .is_some_and(|completed| completed >= d.created)
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn local_and_global_speed_caps_preserve_bytes_and_active_rename_resumes() {
+    use strata::engine::DownloadChange;
+    let server = Server::new();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Manager::new(dir.path().join("history.json")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(manager.set_global_speed_limit(2 * 1024 * 1024))
+        .unwrap()
+        .unwrap();
+    let first = manager
+        .add(&server.url("/file.bin"), dir.path().into(), 4)
+        .unwrap();
+    runtime
+        .block_on(manager.change_download(first, DownloadChange::SpeedLimit(1024 * 1024)))
+        .unwrap()
+        .unwrap();
+    let baseline = manager.snapshots()[0].downloaded;
+    let started = Instant::now();
+    let second = manager
+        .add(&server.url("/file.bin"), dir.path().into(), 4)
+        .unwrap();
+    runtime
+        .block_on(manager.change_download(
+            first,
+            DownloadChange::Rename("renamed while active.bin".into()),
+        ))
+        .unwrap()
+        .unwrap();
+    let a = wait(&manager, first, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    let b = wait(&manager, second, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(a.status, Status::Complete, "{:?}", a.error);
+    assert_eq!(b.status, Status::Complete, "{:?}", b.error);
+    let minimum = Duration::from_secs_f64(
+        (server.bytes.len() as u64 * 2 - baseline) as f64 / (2 * 1024 * 1024) as f64,
+    );
+    assert!(
+        started.elapsed() >= minimum.mul_f64(0.9),
+        "The shared cap was exceeded"
+    );
+    assert_eq!(std::fs::read(a.path()).unwrap(), *server.bytes);
+    assert_eq!(std::fs::read(b.path()).unwrap(), *server.bytes);
+    assert_eq!(a.name, "renamed while active.bin");
+    assert!(
+        a.completed_at
+            .is_some_and(|completed| completed >= a.created)
+    );
+    assert!(
+        b.completed_at
+            .is_some_and(|completed| completed >= b.created)
+    );
     manager.shutdown();
 }
 
@@ -699,6 +771,14 @@ fn ytdlp_download_pause_and_resume_are_byte_exact() {
     let server = Server::new();
     let directory = tempfile::tempdir().unwrap();
     let manager = Manager::new(directory.path().join("history.json")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(manager.set_global_speed_limit(2 * 1024 * 1024))
+        .unwrap()
+        .unwrap();
     let options = strata::protocol::TransferOptions {
         protocol: Some(strata::protocol::Protocol::Video),
         ..Default::default()
