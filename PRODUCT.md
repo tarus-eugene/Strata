@@ -28,6 +28,8 @@ Row checkboxes and Ctrl/Shift/Ctrl+Shift selection support individual toggles, r
 
 Per-download speed limits apply to each selected download across its connections. Settings uses the same modal for a shared global cap. Limits use whole KiB/s, with 0 for unlimited and a 16 KiB/s minimum for nonzero global and torrent limits. Under a global cap, FTP, video, torrent, and Metalink jobs run exclusively to preserve the shared limit; HTTP and SFTP can share it concurrently.
 
+Torrents load metadata and wait for confirmation in an expandable file tree before downloading payloads. Folder checkboxes select descendants and show partial selection; individual files, Select all, and selected count/size are available. Cancel pauses the job, and Resume reopens the picker. Choices persist; only selected files are published. Browser and CLI torrent handoffs use the same flow. Double-clicking a completed table entry opens its file or folder.
+
 ## Brand Commitments
 The download table fills the window without a left sidebar, workspace label, or breadcrumbs. Filters and Settings live in the top toolbar. Row menus expose contextual actions; Delete from device permanently removes owned output and partial data after writes stop. A compact bottom inspector uses one byte-weighted segmented progress bar, has no internal scrolling or action buttons, and retains drag/keyboard resizing with a remembered height and 180 px minimum. The permanent window-bottom footer collapses it with a down chevron and restores it with an up chevron. Accepted downloads bring the app to the foreground. The window title is simply 101 Downloader.
 

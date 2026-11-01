@@ -280,6 +280,8 @@ impl Manager {
                         owns_output: false,
                         priority: parent.priority,
                         speed_limit: parent.speed_limit,
+                        torrent_files: Vec::new(),
+                        selected_files: None,
                     });
                 data.id = parent.id;
                 data.directory = work.clone();

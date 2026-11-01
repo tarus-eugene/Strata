@@ -42,6 +42,7 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 pub enum Status {
     Queued,
     Connecting,
+    SelectingFiles,
     Downloading,
     Pausing,
     Paused,
@@ -57,6 +58,7 @@ impl Status {
         match self {
             Self::Queued => "Queued",
             Self::Connecting => "Connecting",
+            Self::SelectingFiles => "Choose files",
             Self::Downloading => "Downloading",
             Self::Pausing => "Pausing",
             Self::Paused => "Paused",
@@ -117,6 +119,12 @@ impl Part {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TorrentFile {
+    pub name: String,
+    pub size: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Download {
     pub id: u64,
@@ -148,6 +156,10 @@ pub struct Download {
     pub priority: Priority,
     #[serde(default)]
     pub speed_limit: u64,
+    #[serde(default)]
+    pub torrent_files: Vec<TorrentFile>,
+    #[serde(default)]
+    pub selected_files: Option<Vec<usize>>,
 }
 
 impl Download {
@@ -498,6 +510,8 @@ impl Manager {
                 owns_output: false,
                 priority: Priority::Normal,
                 speed_limit: 0,
+                torrent_files: Vec::new(),
+                selected_files: None,
             }),
             control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
@@ -537,6 +551,15 @@ impl Manager {
             if matches!(data.status, Status::Complete | Status::Cancelled) {
                 return;
             }
+            if data.protocol == Protocol::Torrent
+                && data.selected_files.is_none()
+                && !data.torrent_files.is_empty()
+            {
+                data.status = Status::SelectingFiles;
+                data.error = None;
+                self.show_requested.store(true, Ordering::SeqCst);
+                return;
+            }
             job.control.store(RUN, Ordering::SeqCst);
             data.status = Status::Queued;
             data.error = None;
@@ -544,15 +567,75 @@ impl Manager {
         }
     }
 
+    pub fn select_torrent_files(self: &Arc<Self>, id: u64, mut selected: Vec<usize>) -> Result<()> {
+        let _guard = self
+            .controls_lock
+            .try_lock()
+            .context("Another download setting is being saved. Try again in a moment.")?;
+        let job = self.find(id).context("This download no longer exists")?;
+        let previous = {
+            let mut data = job.data.lock().unwrap();
+            ensure!(
+                !self.quitting.load(Ordering::SeqCst)
+                    && !job.running.load(Ordering::SeqCst)
+                    && !job.deleting.load(Ordering::SeqCst)
+                    && !job.editing.load(Ordering::SeqCst),
+                "The download is busy. Try again in a moment."
+            );
+            ensure!(
+                data.protocol == Protocol::Torrent
+                    && data.selected_files.is_none()
+                    && matches!(data.status, Status::SelectingFiles | Status::Paused),
+                "This download is not waiting for file selection"
+            );
+            ensure!(
+                !selected.is_empty(),
+                "Select at least one file to download."
+            );
+            ensure!(
+                selected
+                    .iter()
+                    .all(|&index| index < data.torrent_files.len()),
+                "The file list has changed. Close this dialog and try again."
+            );
+            selected.sort_unstable();
+            selected.dedup();
+            job.editing.store(true, Ordering::SeqCst);
+            let previous = data.clone();
+            data.total = Some(
+                selected
+                    .iter()
+                    .map(|&index| data.torrent_files[index].size)
+                    .sum(),
+            );
+            data.selected_files = Some(selected);
+            data.status = Status::Paused;
+            previous
+        };
+        self.persist();
+        if let Some(error) = self.persistence_error.lock().unwrap().clone() {
+            *job.data.lock().unwrap() = previous;
+            job.editing.store(false, Ordering::SeqCst);
+            bail!(error);
+        }
+        job.editing.store(false, Ordering::SeqCst);
+        self.resume(id);
+        Ok(())
+    }
+
     pub fn pause(&self, id: u64) {
         if let Some(job) = self.find(id) {
             let mut d = job.data.lock().unwrap();
             if matches!(
                 d.status,
-                Status::Queued | Status::Connecting | Status::Downloading
+                Status::Queued | Status::Connecting | Status::Downloading | Status::SelectingFiles
             ) {
                 job.control.store(PAUSE, Ordering::SeqCst);
-                d.status = Status::Pausing;
+                d.status = if job.running.load(Ordering::SeqCst) {
+                    Status::Pausing
+                } else {
+                    Status::Paused
+                };
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::input::TextInput;
 use crate::scroll::{BAR_WIDTH, ScrollState, scroll_area};
+use crate::torrent_tree::{self, TorrentNode};
 use crate::tray::Tray;
 use gpui::{prelude::*, *};
 use std::{
@@ -84,6 +85,7 @@ enum Icon {
     Trash,
     ChevronDown,
     ChevronUp,
+    ChevronRight,
 }
 
 pub struct Strata {
@@ -99,6 +101,12 @@ pub struct Strata {
     edit_input: Entity<TextInput>,
     edit_error: Option<String>,
     edit_saving: bool,
+    torrent_picker: Option<u64>,
+    torrent_checked: BTreeSet<usize>,
+    torrent_focus: Vec<FocusHandle>,
+    torrent_error: Option<String>,
+    torrent_tree: Vec<TorrentNode>,
+    torrent_expanded: BTreeSet<usize>,
     url: Entity<TextInput>,
     search: Entity<TextInput>,
     search_query: String,
@@ -133,6 +141,7 @@ pub struct Strata {
     settings_scroll: ScrollState,
     add_scroll: ScrollState,
     edit_scroll: ScrollState,
+    torrent_scroll: ScrollState,
     _ticker: Task<()>,
     _search_observer: Subscription,
 }
@@ -290,6 +299,7 @@ impl Strata {
                             }
                         }
                         this.refresh();
+                        this.show_pending_torrent(window, cx);
                         if this.view != View::Settings
                             && !this.tray.as_ref().is_some_and(|tray| tray.is_hidden())
                         {
@@ -319,6 +329,12 @@ impl Strata {
             edit_input,
             edit_error: None,
             edit_saving: false,
+            torrent_picker: None,
+            torrent_checked: BTreeSet::new(),
+            torrent_focus: Vec::new(),
+            torrent_error: None,
+            torrent_tree: Vec::new(),
+            torrent_expanded: BTreeSet::new(),
             url,
             search,
             search_query: String::new(),
@@ -353,6 +369,7 @@ impl Strata {
             settings_scroll: ScrollState::default(),
             add_scroll: ScrollState::default(),
             edit_scroll: ScrollState::default(),
+            torrent_scroll: ScrollState::default(),
             _ticker: ticker,
             _search_observer: observer,
         };
@@ -436,6 +453,110 @@ impl Strata {
                 .update(cx, |input, cx| input.set_value(text.trim(), cx));
         }
         self.url.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn show_pending_torrent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.torrent_picker {
+            if !self
+                .downloads
+                .iter()
+                .any(|d| d.id == id && d.status == Status::SelectingFiles)
+            {
+                self.torrent_picker = None;
+                self.focus.focus(window);
+                cx.notify();
+            }
+            return;
+        }
+        if self.adding || self.edit.is_some() || self.menu.is_some() {
+            return;
+        }
+        if let Some(download) = self
+            .downloads
+            .iter()
+            .find(|d| d.status == Status::SelectingFiles)
+        {
+            self.torrent_picker = Some(download.id);
+            self.torrent_checked = (0..download.torrent_files.len()).collect();
+            let (tree, nodes) = torrent_tree::tree(&download.torrent_files);
+            self.torrent_expanded = tree
+                .iter()
+                .filter(|node| !node.children.is_empty())
+                .map(|node| node.id)
+                .collect();
+            self.torrent_tree = tree;
+            self.torrent_focus = (0..=nodes).map(|_| cx.focus_handle()).collect();
+            self.torrent_error = None;
+            self.torrent_scroll = ScrollState::default();
+            self.torrent_focus[0].focus(window);
+            cx.notify();
+        }
+    }
+
+    fn close_torrent_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.torrent_picker.take() {
+            self.manager.pause(id);
+            self.manager.persist();
+        }
+        self.torrent_error = None;
+        self.torrent_focus.clear();
+        self.focus.focus(window);
+        self.refresh();
+        cx.notify();
+    }
+
+    fn start_torrent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.torrent_picker else {
+            return;
+        };
+        match self
+            .manager
+            .select_torrent_files(id, self.torrent_checked.iter().copied().collect())
+        {
+            Ok(()) => {
+                self.torrent_picker = None;
+                self.torrent_error = None;
+                self.torrent_focus.clear();
+                self.selected = Some(id);
+                self.checked = [id].into_iter().collect();
+                self.view = View::All;
+                self.focus.focus(window);
+                self.refresh();
+            }
+            Err(error) => self.torrent_error = Some(format!("{error:#}")),
+        }
+        cx.notify();
+    }
+
+    fn toggle_torrent_node(&mut self, id: Option<usize>, cx: &mut Context<Self>) {
+        let files = if let Some(id) = id {
+            self.torrent_tree
+                .iter()
+                .find_map(|node| node.find(id))
+                .unwrap()
+                .files
+                .clone()
+        } else {
+            (0..self
+                .downloads
+                .iter()
+                .find(|d| Some(d.id) == self.torrent_picker)
+                .unwrap()
+                .torrent_files
+                .len())
+                .collect()
+        };
+        torrent_tree::toggle(&files, &mut self.torrent_checked);
+        self.torrent_error = None;
+        cx.notify();
+    }
+
+    fn expand_torrent_node(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.torrent_expanded.remove(&id) {
+            self.torrent_expanded.insert(id);
+        }
+        self.torrent_focus[id + 1].focus(window);
         cx.notify();
     }
 
@@ -889,7 +1010,7 @@ impl Strata {
                     .child(button("save-edit", if self.edit_saving { "Saving..." } else if rename { "Rename" } else { "Apply limit" }, Icon::Check, true)
                         .track_focus(&self.modal_start_focus).when(self.edit_saving, |button| button.opacity(0.6))
                         .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))))), window, cx.entity_id())
-                .w(px(560.)).max_w(relative(0.9)).max_h(relative(0.85)).border_1().border_color(rgb(0x44484c))
+                .w(px(560.)).max_w(relative(0.9)).max_h(relative(0.85)).bg(rgb(SURFACE)).border_1().border_color(rgb(0x44484c))
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_edit(window, cx))))
         ).with_priority(2)
     }
@@ -1442,7 +1563,231 @@ impl Strata {
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 let modifiers = event.modifiers();
                 this.select_row(id, modifiers.control, modifiers.shift, cx);
+                if event.click_count() == 2
+                    && let Some(download) = this.downloads.iter().find(|download| download.id == id)
+                    && download.status == Status::Complete
+                {
+                    reveal(&download.path());
+                }
             }))
+    }
+
+    fn torrent_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let download = self
+            .downloads
+            .iter()
+            .find(|d| Some(d.id) == self.torrent_picker)
+            .unwrap();
+        let count = download.torrent_files.len();
+        let selected_size = self
+            .torrent_checked
+            .iter()
+            .map(|&index| download.torrent_files[index].size)
+            .sum();
+        let visible = torrent_tree::rows(&self.torrent_tree, &self.torrent_expanded);
+        let row_count = self.torrent_focus.len() - 1;
+        let rows = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(visible.into_iter().map(|(node, depth)| {
+                let id = node.id;
+                let folder = !node.children.is_empty();
+                let selected = node
+                    .files
+                    .iter()
+                    .filter(|index| self.torrent_checked.contains(index))
+                    .count();
+                let size = node
+                    .files
+                    .iter()
+                    .map(|&index| download.torrent_files[index].size)
+                    .sum();
+                div()
+                    .id(("torrent-tree-row", id))
+                    .h(px(40.))
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(8. + depth as f32 * 18.))
+                    .pr(px(8.))
+                    .border_b_1()
+                    .border_color(rgb(RULE))
+                    .hover(|style| style.bg(rgb(RAISED)))
+                    .cursor_pointer()
+                    .child(div().w(px(16.)).flex_shrink_0().when(folder, |disclosure| {
+                        disclosure.child(icon(
+                            if self.torrent_expanded.contains(&id) {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            12.,
+                            MUTED,
+                        ))
+                    }))
+                    .child(
+                        checkbox(
+                            format!("torrent-node-{id}"),
+                            selected == node.files.len(),
+                            selected > 0 && selected < node.files.len(),
+                        )
+                        .track_focus(&self.torrent_focus[id + 1])
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.torrent_focus[id + 1].focus(window);
+                                this.toggle_torrent_node(Some(id), cx);
+                            },
+                        )),
+                    )
+                    .child(icon(
+                        if folder { Icon::Folder } else { Icon::File },
+                        14.,
+                        MUTED,
+                    ))
+                    .child(label(&node.name, 13., TEXT).flex_1().min_w_0().truncate())
+                    .child(label(bytes(size), 12., MUTED).flex_shrink_0())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.torrent_focus[id + 1].focus(window);
+                        if folder {
+                            this.expand_torrent_node(id, window, cx);
+                        } else {
+                            this.toggle_torrent_node(Some(id), cx);
+                        }
+                    }))
+            }));
+        deferred(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(rgba(0x000000a6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(660.))
+                        .max_w(relative(0.9))
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(0x44484c))
+                        .p(px(18.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    label("Choose torrent files", 18., TEXT)
+                                        .font_weight(FontWeight::MEDIUM),
+                                )
+                                .child(
+                                    icon_button("close-torrent", Icon::Close)
+                                        .track_focus(&self.modal_close_focus)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.close_torrent_picker(window, cx)
+                                        })),
+                                ),
+                        )
+                        .child(label(&download.name, 13., MUTED).truncate())
+                        .child(label(
+                            "Select files or folders. Expand folders to choose individual files.",
+                            13.,
+                            MUTED,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    checkbox(
+                                        "torrent-select-all",
+                                        self.torrent_checked.len() == count,
+                                        !self.torrent_checked.is_empty()
+                                            && self.torrent_checked.len() != count,
+                                    )
+                                    .track_focus(&self.torrent_focus[0])
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| this.toggle_torrent_node(None, cx),
+                                    )),
+                                )
+                                .child(label("Select all", 13., TEXT)),
+                        )
+                        .child(
+                            scroll_area(
+                                "torrent-file-list",
+                                &self.torrent_scroll,
+                                rows,
+                                window,
+                                cx.entity_id(),
+                            )
+                            .h(px((row_count as f32 * 40.).min(280.).min(
+                                (f32::from(window.viewport_size().height) - 440.).max(80.),
+                            )))
+                            .w_full()
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(RULE)),
+                        )
+                        .child(label(
+                            format!(
+                                "{} of {count} files selected · {}",
+                                self.torrent_checked.len(),
+                                bytes(selected_size)
+                            ),
+                            13.,
+                            MUTED,
+                        ))
+                        .children(
+                            self.torrent_error
+                                .as_ref()
+                                .map(|error| label(error, 12., RED)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(10.))
+                                .child(
+                                    button("cancel-torrent", "Cancel", Icon::Close, false)
+                                        .track_focus(&self.modal_choose_focus)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.close_torrent_picker(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    button(
+                                        "start-torrent",
+                                        "Download selected",
+                                        Icon::Download,
+                                        true,
+                                    )
+                                    .track_focus(&self.modal_start_focus)
+                                    .when(self.torrent_checked.is_empty(), |button| {
+                                        button.opacity(0.5)
+                                    })
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| this.start_torrent(window, cx),
+                                    )),
+                                ),
+                        )
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, window, cx| {
+                                this.close_torrent_picker(window, cx)
+                            }),
+                        ),
+                ),
+        )
+        .with_priority(2)
     }
 
     fn add_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1466,6 +1811,7 @@ impl Strata {
                     .w(px(660.))
                     .max_w(relative(0.9))
                     .max_h(relative(0.85))
+                    .bg(rgb(SURFACE))
                     .border_1()
                     .border_color(rgb(0x44484c))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
@@ -1898,6 +2244,102 @@ impl Render for Strata {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.torrent_picker.is_some() {
+                    let focused = this
+                        .torrent_focus
+                        .iter()
+                        .position(|handle| handle.is_focused(window));
+                    let visible = torrent_tree::rows(&this.torrent_tree, &this.torrent_expanded)
+                        .iter()
+                        .map(|(node, depth)| (node.id, *depth, !node.children.is_empty()))
+                        .collect::<Vec<_>>();
+                    match key {
+                        "escape" => this.close_torrent_picker(window, cx),
+                        "space" | "enter" if focused.is_some() => {
+                            this.toggle_torrent_node(focused.unwrap().checked_sub(1), cx);
+                        }
+                        "space" | "enter" => {
+                            if this.modal_close_focus.is_focused(window)
+                                || this.modal_choose_focus.is_focused(window)
+                            {
+                                this.close_torrent_picker(window, cx);
+                            } else if this.modal_start_focus.is_focused(window) {
+                                this.start_torrent(window, cx);
+                            }
+                        }
+                        "left" | "right" => {
+                            if let Some(position) = focused
+                                .and_then(|index| index.checked_sub(1))
+                                .and_then(|id| visible.iter().position(|row| row.0 == id))
+                            {
+                                let (id, depth, folder) = visible[position];
+                                if folder
+                                    && ((key == "right" && !this.torrent_expanded.contains(&id))
+                                        || (key == "left" && this.torrent_expanded.contains(&id)))
+                                {
+                                    this.expand_torrent_node(id, window, cx);
+                                } else {
+                                    let next = if key == "right" && folder {
+                                        visible.get(position + 1).map(|row| row.0)
+                                    } else if key == "left" {
+                                        visible[..position]
+                                            .iter()
+                                            .rev()
+                                            .find(|row| row.1 < depth)
+                                            .map(|row| row.0)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(id) = next {
+                                        this.torrent_focus[id + 1].focus(window);
+                                        let position =
+                                            visible.iter().position(|row| row.0 == id).unwrap();
+                                        this.torrent_scroll.reveal(
+                                            position as f32 * 40.,
+                                            (position + 1) as f32 * 40.,
+                                        );
+                                        cx.notify();
+                                    }
+                                }
+                            }
+                        }
+                        "tab" | "up" | "down" => {
+                            let mut handles = vec![this.torrent_focus[0].clone()];
+                            handles.extend(
+                                visible
+                                    .iter()
+                                    .map(|row| this.torrent_focus[row.0 + 1].clone()),
+                            );
+                            if key == "tab" {
+                                handles.extend([
+                                    this.modal_choose_focus.clone(),
+                                    this.modal_start_focus.clone(),
+                                    this.modal_close_focus.clone(),
+                                ]);
+                            }
+                            let index = handles
+                                .iter()
+                                .position(|handle| handle.is_focused(window))
+                                .unwrap_or(0);
+                            let next = if key == "up"
+                                || (key == "tab" && event.keystroke.modifiers.shift)
+                            {
+                                (index + handles.len() - 1) % handles.len()
+                            } else {
+                                (index + 1) % handles.len()
+                            };
+                            handles[next].focus(window);
+                            if next > 0 && next <= visible.len() {
+                                this.torrent_scroll
+                                    .reveal((next - 1) as f32 * 40., next as f32 * 40.);
+                            }
+                            cx.notify();
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.edit.is_some() {
                     match key {
                         "escape" => this.close_edit(window, cx),
@@ -2078,6 +2520,7 @@ impl Render for Strata {
             )
             .children(self.adding.then(|| self.add_modal(window, cx)))
             .children(self.edit.as_ref().map(|_| self.edit_modal(window, cx)))
+            .children(self.torrent_picker.map(|_| self.torrent_modal(window, cx)))
     }
 }
 
@@ -2496,6 +2939,7 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
                 ],
                 Icon::ChevronDown => vec![vec![(5., 8.), (12., 15.), (19., 8.)]],
                 Icon::ChevronUp => vec![vec![(5., 16.), (12., 9.), (19., 16.)]],
+                Icon::ChevronRight => vec![vec![(8., 5.), (15., 12.), (8., 19.)]],
                 Icon::Link => vec![
                     vec![
                         (10., 6.),

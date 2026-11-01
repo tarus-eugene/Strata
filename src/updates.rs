@@ -201,13 +201,13 @@ mod tests {
     async fn checks_http_responses_and_bounds_metadata() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        let newer = format!(
+            "v{}.0.0",
+            version(env!("CARGO_PKG_VERSION")).unwrap()[0] + 1
+        );
 
         for (status, body, expected) in [
-            (
-                "200 OK",
-                serde_json::to_vec(&release("v0.2.2")).unwrap(),
-                "",
-            ),
+            ("200 OK", serde_json::to_vec(&release(&newer)).unwrap(), ""),
             ("404 Not Found", vec![], "No public GitHub release"),
             ("403 Forbidden", vec![], "rate limit"),
             ("429 Too Many Requests", vec![], "rate limit"),

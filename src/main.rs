@@ -5,6 +5,7 @@ mod datetime;
 mod input;
 mod scroll;
 mod text;
+mod torrent_tree;
 mod tray;
 mod ui;
 

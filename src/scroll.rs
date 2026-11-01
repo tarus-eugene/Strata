@@ -67,6 +67,16 @@ fn thumb(viewport: f32, maximum: f32, position: f32) -> (f32, f32) {
 }
 
 impl ScrollState {
+    pub fn reveal(&self, top: f32, bottom: f32) {
+        let current: f32 = (-self.handle.offset().y).into();
+        let height: f32 = self.handle.bounds().size.height.into();
+        if top < current {
+            self.jump(top);
+        } else if bottom > current + height {
+            self.jump(bottom - height);
+        }
+    }
+
     fn jump(&self, position: f32) {
         let maximum: f32 = self.handle.max_offset().height.into();
         let position = position.clamp(0., maximum.max(0.));
