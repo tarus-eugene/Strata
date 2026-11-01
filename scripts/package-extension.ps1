@@ -3,7 +3,7 @@ $root = Split-Path $PSScriptRoot
 $extension = Join-Path $root 'extension'
 $output = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-$files = @('manifest.json','background.js','popup.html','popup.css','popup.js','setup.html','setup.css','id.txt','README.md','icons')
+$files = @('manifest.json','background.js','popup.html','popup.css','popup.js','setup.html','setup.css','id.txt','icons')
 $paths = @($files | ForEach-Object {
     $path = Join-Path $extension $_
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing extension file: $_" }

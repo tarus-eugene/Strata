@@ -1,75 +1,74 @@
 # 101 Downloader
 
-A native Windows download manager written in Rust and GPUI. A calm dark queue with parallel HTTP transfers, FTP, SFTP, WebDAV, native torrents, verified Metalinks, and video downloads through yt-dlp.
+A native Windows download manager built with Rust and GPUI. Downloads run in a persistent queue with parallel HTTP connections, pause/resume, browser capture, torrent file selection, and per-download or global speed limits.
 
-## Run
+## Installation
 
-```powershell
-.\run.ps1
-```
+Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.2-x64.exe`.
 
-Or open `target\debug\strata.exe` after building. The executable runs independently of Cargo; no web server or browser is required.
+The installer supports Windows 10 version 2004 or later and Windows 11 on x64-compatible systems. A working GPU driver is required. Installation is per Windows account and does not require administrator access. The default location is `%LOCALAPPDATA%\Programs\101 Downloader`.
 
-The script uses the project-local Rust installation when present and finds the Visual Studio C++ environment automatically. On a fresh machine, install stable [Rust](https://rustup.rs/), Visual Studio C++ Build Tools, and a Windows SDK. GPUI requires a working GPU driver.
+The package includes the desktop app, command-line client, native browser bridge, Chromium companion extension, Visual C++ runtime DLLs, and pinned yt-dlp, FFmpeg, and Deno helpers. The installer is unsigned.
 
-```powershell
-.\run.ps1 build
-.\run.ps1 test
-.\run.ps1 clippy
-.\run.ps1 build -Release
-```
+The app must be fully closed through **Quit 101 Downloader** in the tray menu before an upgrade or uninstall. Closing the main window only hides it to the tray. Upgrades retain history, settings, partial transfers, and downloaded files. Uninstall also retains download data.
 
-Source builds retain the crate's `strata.exe`, `strata-cli.exe`, and `strata-bridge.exe` names; the installer names them `101Downloader.exe`, `101Downloader-cli.exe`, and `101Downloader-Bridge.exe`. The release executable is `target\release\strata.exe`. Keep `Cargo.lock` to reproduce the resolved dependency versions. This project was built with Rust 1.92.0.
+## Download management
 
-## Using 101 Downloader
+| Control | Behavior |
+| --- | --- |
+| **New download** / **Ctrl+N** | Accepts a URL, magnet link, or local torrent/Metalink descriptor. A valid clipboard source prefills the form. |
+| **Search** / **Ctrl+F** | Filters the download table. Filter, Settings, and New download occupy the right side of the toolbar; selection actions occupy the left. |
+| Row selection | Checkboxes, **Ctrl+click**, **Shift+click**, and **Ctrl+Shift+click** support individual, range, and additive selection. The header checkbox selects visible rows; **Ctrl+A** selects them when the table has focus. |
+| Row context menu | Provides pause/resume, rename, priority, speed limit, open file/folder, copy link, cancel, and permanent deletion. Batch-capable actions apply to the current selection. |
+| **Rename** | Prefills the current name and selects the filename stem without its last extension. Folder names are selected in full. Existing paths are never replaced. |
+| **Set priority** | High, Normal, and Low determine which queued transfer starts next. Equal priorities retain creation order; active transfers are not preempted. |
+| Double-click | Opens a completed download's file or output folder. |
+| **Cancel** | Stops a transfer while retaining partial data. |
+| **Delete from device** | Waits for writes to stop, deletes owned output and partial data, and removes the entry after successful cleanup. Failures leave the entry available for retry. |
 
-- Add a URL or magnet with **New download** or **Ctrl+N**. The centered modal fills a valid clipboard source. **Open torrent / Metalink file** selects a descriptor. Enter starts; Escape or clicking outside closes it. Tab stays within the modal controls. Native text inputs use a blinking caret at the Windows caret rate.
-- Search with **Ctrl+F**. The full-width table shows file name, size, status, progress, speed, and ETA. Unknown-size and stopped transfers show no ETA. Summary cards are omitted to reclaim table space. The compact toolbar centers search, groups **Filter**, **Settings**, and **New download** on the right, and shows selection actions on the left. With nothing selected, only **Pause all** appears there.
-- Click a row to inspect its destination, source, completion date/time, priority, speed limit, and segmented connection-progress bar in the bottom panel. The panel fits without scrolling. Drag its top divider to resize it; focus the divider and press **Up/Down** for keyboard resizing. Its height is remembered. Use the down arrow in the footer at the bottom of the window to collapse the panel, and the up arrow to restore it.
-- Each row starts with a checkbox. **Ctrl+click** toggles individual selections, **Shift+click** selects a range in the current displayed order, and **Ctrl+Shift+click** adds a range. The header checkbox selects or clears the visible rows; **Ctrl+A** selects them when the table has focus. Pause, resume, cancel, delete, speed-limit, and priority context actions apply to the selection. Right-click a row or use its three-dot menu.
-- **Rename** opens a modal with the current name selected except for the last file extension. Folder names are selected in full. Active transfers pause briefly and resume after renaming; completed files/folders are moved without replacing existing paths. Invalid names and collisions leave the original download intact.
-- **Speed limit** in a row's context menu sets a limit for each selected download, shared by all of its connections. **Settings → Global speed limit** sets a shared cap across all downloads. Values are in KiB/s; **0** means unlimited. Global and torrent limits start at 16 KiB/s. Under a global cap, FTP, video, torrent, and Metalink jobs occupy the queue exclusively so their separate rate controls cannot exceed that cap. HTTP and SFTP jobs share it concurrently. Changing limits pauses affected active transfers briefly, then resumes them.
-- **Set priority → High / Normal / Low** controls which queued transfer starts next. Equal priorities keep creation order; active transfers finish without preemption. Priority, limits, and renamed destinations survive restart.
-- The **Created** column uses the Windows short date format. **Completed at** uses the Windows local date and preferred 12/24-hour time, without seconds. Older completed entries without a recorded completion timestamp show a dash.
-- Each row has a **three-dot menu**. **Delete from device** waits for writes to stop, permanently deletes its owned file/output folder and partial data, then removes the entry. Locked-file and permission failures keep the entry with an error so deletion can be retried. **Cancel** retains partial data.
-- Pause/resume individual downloads, pause all, or cancel a transfer. **Closing the window hides 101 Downloader to the system tray and keeps downloads running.** Click the tray icon or choose **Open 101 Downloader** from its right-click menu to restore it. Launching the app again also restores its existing window.
-- To fully exit, right-click the tray icon and choose **Quit 101 Downloader**. Quit pauses active transfers and saves history; they reopen paused next time. If Windows puts the tray icon in the overflow area, use the taskbar's hidden-icons arrow to find it.
-- Choose the download folder and 1, 4, 8, or 16 connections in Settings. Up to three downloads run simultaneously.
-- The app checks this repository's public GitHub Releases at startup and offers **Download update** when a newer stable Windows version is available. Use **Settings → App updates → Check for updates** to check again or retry a failed check. **Download update** adds the installer to your normal download queue. After it finishes, quit through the tray menu and run the installer; history, settings, and downloaded files are retained. The app never downloads or runs an installer automatically.
-- Open a finished file or its folder from the row's context menu. 101 Downloader never automatically opens downloaded files.
-- The custom title bar supports dragging, double-click maximize/restore, window snapping, minimize, and close. Its controls also work with keyboard focus.
+Up to three downloads run simultaneously. Settings provides a destination folder and connection counts of 1, 4, 8, or 16. Small files and servers without range support use fewer connections.
 
-The tray icon is removed on quit and re-added after Windows Explorer restarts. If the notification area is unavailable, a visible message explains that closing will quit instead of hiding the only reachable window.
+The bottom details panel shows the selected download's destination, source, completion time, priority, limit, and segmented progress. Its divider supports dragging and **Up/Down** keyboard resizing; the height is remembered. The footer chevron collapses or restores the panel. Tables, Settings, and overflowing dialogs have draggable scrollbars. Smooth wheel scrolling respects Windows animation preferences.
 
-## Windows installer
+The **Created** column and **Completed at** details use Windows date and local-time preferences, including the system's 12/24-hour setting. Older completed entries without a saved completion timestamp show a dash. Displayed speed and ETA use a roughly two-second rolling average to reduce fluctuations caused by short sampling intervals and batched progress updates. Unknown-size and stopped transfers have no ETA.
 
-Run `dist\101-Downloader-Setup-0.3.2-x64.exe` to install 101 Downloader for your Windows account. Administrator access is not required. It includes the optimized app, `101Downloader-cli.exe`, local browser bridge, Visual C++ runtime DLLs, browser extension, pinned yt-dlp / FFmpeg / Deno helpers, Start menu shortcuts, and an optional desktop shortcut. Windows 10 version 2004 or later, Windows 11, and a working GPU driver are required.
+### Speed limits
 
-The browser connection task is selected by default. The extension itself must be loaded once in each browser profile; the installer does not change browser security policies. Use the Start menu's **Browser companion setup** shortcut for instructions. Uninstall from Windows Settings → Apps; downloaded files, partial transfers, history, and settings are retained. Quit 101 Downloader through its tray menu before upgrading or uninstalling.
+**Speed limit** in a row context menu applies a limit to each selected download, shared across its connections. **Settings → Global speed limit** applies a shared cap. Values are whole KiB/s; **0** means unlimited. Nonzero global and torrent limits start at 16 KiB/s.
 
-To rebuild the installer, install [Inno Setup](https://jrsoftware.org/isdl.php) 6.3 or later and the Visual Studio C++ build tools, then run:
+Under a global cap, FTP, video, torrent, and Metalink jobs run exclusively so their separate rate controls cannot exceed the shared limit. HTTP and SFTP jobs can share the cap concurrently. Changing a limit pauses affected active transfers briefly, applies the setting, and resumes them. Priorities, limits, and renamed destinations persist across restarts.
 
-```powershell
-.\scripts\package-installer.ps1
-```
+### Torrents
 
-This builds the release executables and writes a versioned setup EXE, SHA-256 file, and `101-downloader-browser-extension.zip` to `dist`. Use `-SkipBuild` to package an existing release build, `-CompilerPath` for a custom `ISCC.exe`, or `-RuntimeDirectory` for the x64 `Microsoft.VC*.CRT` redistributable folder. Build staging stays under the ignored `.tools` directory. No Rust toolchain is needed on the computer where 101 Downloader is installed. The setup EXE is currently unsigned.
+Torrents load metadata before presenting an expandable file tree. Folder checkboxes select descendants and display partial-selection states; individual file checkboxes and **Select all** control the selection. The dialog shows the selected file count and total size. Payload downloading starts only after confirmation.
 
-Media helpers are downloaded from their official release repositories and checked against the sizes and SHA-256 hashes in `resources/media-tools.json`. The installed `tools` folder includes their licenses and source/build links. Use `scripts/fetch-media-tools.ps1` to prepare the development cache; source debug builds also discover that cache. Media helpers can alternatively be placed beside the app in `tools` or on PATH. The first installer build needs network access to fetch these assets.
+Canceling the picker leaves the job paused; Resume reopens it. Confirmed choices persist across restarts. Only selected files are published, and empty unselected folders are removed. The same selection flow applies to browser and CLI handoffs. Native torrents upload while active and stop seeding on completion or pause. Resume rechecks existing pieces.
 
-## Protocols and command line
+### Tray and updates
 
-The GUI detects protocols from URLs and descriptor filenames. `101Downloader-cli.exe` accepts the same sources and adds explicit protocol flags. It queues the transfer in the desktop app, starting the app if necessary; it does not launch a separate downloader queue.
+Closing the main window hides the app to the system tray while transfers continue. The tray icon, its **Open 101 Downloader** command, and subsequent app launches restore the existing window. **Quit 101 Downloader** pauses active transfers, saves history, and exits; transfers reopen paused.
 
-| Protocol | Detection / override | Behavior |
+The app checks this repository's public GitHub Releases at startup. **Settings → App updates → Check for updates** performs a manual check. **Download update** adds a newer stable Windows installer to the normal queue. Downloading and installation both require explicit actions.
+
+## Supported protocols
+
+| Protocol | Source / override | Support |
 | --- | --- | --- |
-| HTTP / HTTPS | Automatic | Parallel ranges, safe resume, original file bytes; HTTP, HTTPS, SOCKS5 and SOCKS5h proxies |
-| FTP | `ftp://` or `--ftp` | Anonymous or authenticated binary transfer; REST resume |
-| SFTP | `sftp://` or `--sftp` | Password or OpenSSH private key; strict known-host verification; seek resume |
-| WebDAV | `webdav://`, `webdavs://` or `--webdav` | HTTP(S) GET with URL-provided Basic authentication; normal HTTP range behavior |
-| BitTorrent | Magnet or `.torrent` file / URL | Native `librqbit` through the `torrent-native` Cargo feature; v1 / hybrid torrents, DHT, trackers, piece checks and partial-file rechecking |
-| Metalink | `.meta4`, `.metalink` or `--metalink` | v3 and v4; ordered mirror failover, SHA-256 / SHA-512 / MD5 whole-file checks, multiple files |
-| Video sites | Known video host or `--ytdlp` | yt-dlp extraction; FFmpeg merges and Deno supports JavaScript challenges |
+| HTTP / HTTPS | Automatic | Parallel ranges, validated resume, original file bytes; HTTP, HTTPS, SOCKS5, and SOCKS5h proxies |
+| FTP | `ftp://` / `--ftp` | Anonymous or authenticated binary transfers with REST resume |
+| SFTP | `sftp://` / `--sftp` | Password or OpenSSH key authentication, strict known-host verification, seek resume |
+| WebDAV | `webdav://`, `webdavs://` / `--webdav` | HTTP(S) GET with Basic authentication and normal range behavior |
+| BitTorrent | Magnet, local `.torrent`, or torrent URL | Native v1/hybrid torrents, trackers, DHT, file selection, and piece verification |
+| Metalink | `.meta4`, `.metalink` / `--metalink` | v3/v4 descriptors, mirror failover, multiple files, SHA-256/SHA-512/MD5 verification |
+| Video sites | Recognized host / `--ytdlp` | yt-dlp extraction with FFmpeg merging and Deno JavaScript support |
+
+Torrent, Metalink, and video transfers stage files privately and publish a download folder without replacing an existing destination. Metalink descriptors are limited to 8 MiB and 1024 files, reject unsafe paths and XML DTDs, and require a supported whole-file checksum for each file. Failed mirrors or checksums trigger the next mirror.
+
+Recognized video hosts include YouTube, Vimeo, Twitch, TikTok, and Instagram; `--ytdlp` selects the extractor for other supported sites. Site availability, login requirements, DRM, and upstream changes can prevent extraction. Browser cookies are not imported automatically. Pausing stops the media process tree and retains resumable files. Scheduling is not currently implemented.
+
+## Command line
+
+`101Downloader-cli.exe` queues transfers in the desktop app and starts it when necessary. The desktop executable accepts the same transfer flags; the console client reports command-line errors and queue IDs.
 
 ```powershell
 .\101Downloader-cli.exe https://example.com/large.zip --connections 8
@@ -77,107 +76,111 @@ The GUI detects protocols from URLs and descriptor filenames. `101Downloader-cli
 .\101Downloader-cli.exe --ftp ftp.example.com/pub/file.zip
 .\101Downloader-cli.exe --sftp alice@example.com/archive.zip --identity C:\Users\alice\.ssh\id_ed25519
 .\101Downloader-cli.exe --webdav https://alice:password@example.com/archive.zip
-.\101Downloader-cli.exe 'magnet:?xt=urn:btih:YOUR_INFO_HASH'
+.\101Downloader-cli.exe 'magnet:?xt=urn:btih:INFO_HASH'
 .\101Downloader-cli.exe C:\Downloads\release.torrent
 .\101Downloader-cli.exe --metalink https://example.com/release.meta4
 .\101Downloader-cli.exe --ytdlp https://www.youtube.com/watch?v=VIDEO_ID
 ```
 
-Installed executables are under `%LOCALAPPDATA%\Programs\101 Downloader` by default. Source builds use `target\debug` or `target\release`. `101Downloader.exe` also accepts the transfer flags; the console CLI provides visible command-line errors and queue IDs.
-
-Use `--user`, `--password-stdin`, `--identity`, `--key-passphrase-stdin`, `--known-hosts`, `--directory`, and `--connections` for explicit options. For a password without putting it in shell history:
+Explicit transfer options include `--user`, `--password-stdin`, `--identity`, `--key-passphrase-stdin`, `--known-hosts`, `--directory`, and `--connections`. Standard-input password flags avoid including secrets in command arguments or shell history:
 
 ```powershell
 $credential = Get-Credential -UserName alice
 $credential.GetNetworkCredential().Password | .\101Downloader-cli.exe sftp://alice@example.com/archive.zip --password-stdin
 ```
 
-URL passwords, private-key passphrases, and proxy passwords are protected with Windows DPAPI for your current Windows account before history is saved. Source links omit user information. These credentials cannot be decrypted by another Windows account; re-enter them after moving history to a different account or machine. URL query parameters are retained as part of the download link.
+URL and proxy passwords and key passphrases are protected with Windows DPAPI before history is saved. They are bound to the current Windows account and require re-entry after migration to another account or machine. Displayed source links omit user information; URL query parameters remain part of the saved link.
 
-SFTP uses `%USERPROFILE%\.ssh\known_hosts` by default and refuses unknown, changed, or revoked keys. Verify the host fingerprint with the server administrator, connect with OpenSSH to record the verified key, or supply `--known-hosts`. Settings can select a private key / known-hosts file and configure the HTTP proxy. Explicitly pinned host keys are supported; CA-only known-hosts entries do not authorize an unpinned key. Encrypted private keys accept `--key-passphrase-stdin`.
-
-Torrent, Metalink, and video jobs publish a download folder. They stage files privately and do not replace an existing destination. Torrents first load metadata, then open a file tree before downloading payloads. Expand folders to choose individual files, or use folder checkboxes to select their contents; partial selections show a mixed checkbox. The dialog shows the selected count and size. Cancel leaves the torrent paused; Resume reopens selection. Choices persist across restarts, and completed output includes only selected files. This also applies to magnets and browser/CLI handoffs. Native torrents upload while active and stop seeding on completion or pause. Resume rechecks existing pieces. Metalink descriptors are limited to 8 MiB / 1024 files, reject unsafe paths and XML DTDs, and require a supported whole-file checksum for each file. A bad mirror or checksum is tried against the next mirror; no unverified file is published.
-
-Video hosts automatically recognized include YouTube, Vimeo, Twitch, TikTok, and Instagram, including their subdomains; `--ytdlp` selects the extractor for other supported sites. Site changes, login requirements, DRM, and availability can prevent an extraction. Browser cookies are not exported automatically. Pause stops the media process tree and retains resumable files.
-
-The `torrent-native` feature is enabled by default and included in the installer. To omit it, run `.\run.ps1 build -CargoArguments @('--no-default-features')`. `run.ps1` forwards `-CargoArguments` to Cargo for targeted tests and feature checks.
+SFTP defaults to `%USERPROFILE%\.ssh\known_hosts` and rejects unknown, changed, or revoked keys. Verified OpenSSH host entries or `--known-hosts` provide host-key trust. CA-only entries do not authorize an unpinned key. Encrypted private keys use `--key-passphrase-stdin`. Proxy settings apply to HTTP(S), WebDAV, Metalink HTTP mirrors, and video transfers; FTP, SFTP, and torrent peers use direct connections.
 
 ## Chromium browser companion
 
-The same extension supports Windows Chromium browsers with Manifest V3, downloads, and native messaging enabled: Chrome, Edge, Brave, Vivaldi, Opera / Opera GX, Chromium, and compatible forks. Connect once using the installer or **Settings → Browser companion → Connect browsers**. From a source checkout, run `.\install-browser.ps1`.
+The Manifest V3 companion supports compatible Windows Chromium browsers, including Chrome, Edge, Brave, Vivaldi, Opera/Opera GX, and Chromium. Managed browser policies and fork-specific restrictions can prevent unpacked extensions or native messaging.
 
-1. Open your browser's extensions page (`chrome://extensions`, `edge://extensions`, `brave://extensions`, `vivaldi://extensions`, or `opera://extensions`) and turn on **Developer mode**.
-2. Choose **Load unpacked** and select the `extension` folder inside your 101 Downloader installation or source checkout. **Settings → Extension folder** opens the correct location.
-3. Pin **101 Downloader — Download companion**. Open its popup to check the app connection and turn capture on or off.
+The installer registers the native bridge for the current Windows account. **Settings → Browser companion → Connect browsers** and `install-browser.ps1` provide registration for source builds.
 
-When building from source, build both executables with `.\run.ps1 build`, then use **Settings → Browser companion → Connect browsers**, or run:
+1. The browser's extensions page (`chrome://extensions`, `edge://extensions`, `brave://extensions`, `vivaldi://extensions`, or `opera://extensions`) provides the **Developer mode** switch.
+2. **Load unpacked** accepts the installed or checked-out `extension` folder. **Settings → Extension folder** opens its location.
+3. The **101 Downloader — Download companion** popup shows connection status and the capture switch.
+
+Capture is enabled by default. Eligible browser downloads are paused during handoff and canceled only after the app confirms that the transfer was saved to its queue. A failed handoff resumes the browser's copy. Accepted downloads restore the desktop app. Browser safety scanning is respected, and pending handoffs are recovered after extension-worker restarts.
+
+The extension sends the URL, browser filename, and referrer. It has no page injection, browsing-history access, or cookie/password import. Browser-generated `blob:` files, private downloads, already-paused downloads, and flagged files remain in the browser. Login-only and POST-generated downloads may require capture to be disabled. Queue acceptance confirms handoff; subsequent transfer errors appear in the desktop app.
+
+The `downloads.ui` permission suppresses the browser download interface while capture is enabled. Capture-off and browser fallback restore it. This control is profile-wide and may be unavailable in some Chromium forks. Other permissions are `downloads`, `nativeMessaging`, `storage`, and `contextMenus`.
+
+The desktop app and bridge executable must remain together; moving them requires bridge registration to be refreshed. Registration commands for source builds are:
 
 ```powershell
 .\install-browser.ps1
+.\install-browser.ps1 -AppDirectory .\target\release
+.\install-browser.ps1 -Uninstall
 ```
 
-Keep the installed `101Downloader.exe` and `101Downloader-Bridge.exe` in the same folder (source builds retain `strata.exe` and `strata-bridge.exe`). If you move the executables, reconnect the bridge. For a release build, run `.\install-browser.ps1 -AppDirectory .\target\release`. Unregister it with `.\install-browser.ps1 -Uninstall`; this retains your downloads and history. The installer removes its own registration during uninstall and preserves a registration that has since been pointed to a different 101 Downloader installation.
+Unregistration retains history and downloads. Installer uninstall preserves a registration that has since been assigned to another installation.
 
-With capture enabled, the extension pauses eligible HTTP/HTTPS file downloads, sends the URL, browser-provided filename, and referrer to 101 Downloader, and cancels Chrome's paused copy **only after the app confirms the download was saved to its queue**. If the native host is unavailable or the app refuses the request, Chrome resumes its own download. A suspended extension worker recovers its pending handoffs on restart.
+The bridge uses Chromium's [native messaging protocol](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and a local named pipe restricted to the current Windows account and SYSTEM. The extension's committed public key fixes its ID at `eaccbjfepcpidchboonodedpepgboolc`. Messages are length-bounded, limited to fixed actions, and accepted only from that extension origin. Registration uses the Chrome, Chromium, and Edge per-user native messaging locations; compatible forks may use those lookups.
 
-Capture is enabled by default: start a normal browser download and it is sent to 101 Downloader automatically, with no **Download with 101 Downloader** action required. Accepted browser downloads open or restore the app, including when it is hidden in the tray. Downloads awaiting browser scanning are retried when the browser reports them safe. The context-menu command and popup URL field remain optional shortcuts. Checking connection status alone does not open the app.
+## Building from source
 
-The extension uses Manifest V3 with `downloads`, `downloads.ui`, `nativeMessaging`, `storage`, and `contextMenus` permissions. No page injection, remote server, browsing-history access, cookies, or passwords. Browser-generated `blob:` files, private downloads, already-paused downloads, and files flagged by Chrome remain in the browser. Login-only and POST-generated downloads may require keeping capture off. A queue acknowledgement confirms handoff; later network failures are shown in 101 Downloader.
+The build requires stable Rust, Visual Studio C++ Build Tools, and a Windows SDK. `run.ps1` discovers the C++ environment and uses the project-local Rust installation when available. Dependency versions are recorded in `Cargo.lock`.
 
-The bridge uses Chrome's [native messaging protocol](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) and a local named pipe restricted to your Windows user and SYSTEM. The committed extension public key keeps its ID stable: `eaccbjfepcpidchboonodedpepgboolc`. Only that extension origin is allowed; messages are length-bounded and accept fixed actions, never commands.
+```powershell
+.\run.ps1
+.\run.ps1 build
+.\run.ps1 build -Release
+```
 
-The bridge is registered in the per-user Chrome, Chromium, and Edge native messaging locations. [Edge documents its own location and the Chromium/Chrome fallbacks](https://learn.microsoft.com/en-us/microsoft-edge/extensions-chromium/developer-guide/native-messaging); [Opera documents the Chrome registration location](https://help.opera.com/en/extensions/message-passing/). Other compatible Chromium forks use their standard native messaging lookup. Fork-specific restrictions and managed browser policies can prevent connection; every fork has not been tested individually. This desktop bridge targets Windows, not Android or iOS.
+Source builds produce `strata.exe`, `strata-cli.exe`, and `strata-bridge.exe` under `target\debug` or `target\release`. Installer names are `101Downloader.exe`, `101Downloader-cli.exe`, and `101Downloader-Bridge.exe`. The executables run independently of Cargo, without a web server or browser.
 
-## Logo
+The `torrent-native` feature is enabled by default. `run.ps1` forwards `-CargoArguments` for feature selection and targeted checks:
 
-The logo uses the user-supplied orange hanging orangutan illustration, with its original black background and colors. The palette uses branding orange #E85002, black #000000, white #F9F9F9, and neutral grays #A7A7A7, #646464, and #333333 from the supplied reference. The unchanged source image is `assets/brand/mark.png`. The app embeds that PNG and a Windows ICO; the extension ships matching resized PNGs. Regenerate the platform icons with `.\scripts\generate-icons.ps1`.
+```powershell
+.\run.ps1 build -CargoArguments @('--no-default-features')
+```
 
-## How parallel downloading works
+### Installer packaging
 
-1. Probe with `Range: bytes=0-0` and `Accept-Encoding: identity`.
-2. Require a valid `206 Content-Range`, a known size, and a strong ETag or Last-Modified validator before segmenting. Use fewer connections for small files (minimum target part size: 256 KiB).
-3. Put non-overlapping ranges into a shared per-download queue (target 4 MiB, at least the configured worker count). A fixed pool of workers pulls the next chunk and reuses pooled HTTP connections; the configured connection limit still applies. Each chunk has its own part file.
-4. Validate every range response, total size, encoding, and any returned validator. Retry a broken connection up to three times, continuing from the part's actual length. When the queue empties and workers are idle, split a slow active range's remaining bytes. Stop and flush its writer before shortening the range and queuing the new tail; saved part indices stay stable.
-5. For resume, probe again and compare the saved validator and size. Discard stale part contents if the remote file changed. Send `If-Range` with range requests.
-6. Assemble complete parts in byte order, flush the file, and publish it without replacing an existing destination. Remove this transfer's parts after success.
+Packaging requires [Inno Setup](https://jrsoftware.org/isdl.php) 6.3 or later and the Visual Studio C++ build tools:
 
-Servers that ignore ranges, omit validators, or lack a known size use a single full-file connection. Those transfers restart from zero on resume. This deliberately favors file integrity over pretending every server supports resumable parallel downloads. Parallel connections help on some servers; they cannot increase the bandwidth of your internet connection.
+```powershell
+.\scripts\package-installer.ps1
+```
 
-## Text clarity
+The script builds release executables and writes a versioned setup EXE, SHA-256 file, and `101-downloader-browser-extension.zip` to `dist`. `-SkipBuild` packages an existing release build; `-CompilerPath` selects `ISCC.exe`; `-RuntimeDirectory` selects an x64 Visual C++ redistributable folder. Staging is stored under the ignored `.tools` directory. Installed systems do not need Rust.
 
-GPUI 0.2.2's Windows DirectWrite backend requests **grayscale** antialiasing; toggling ClearType does not turn it into a subpixel renderer. See [the pinned DirectWrite source](https://docs.rs/crate/gpui/0.2.2/source/src/platform/windows/direct_write.rs). Upstream also tracks [additional hinting support](https://github.com/zed-industries/zed/issues/55214).
+Media helpers come from their official release repositories and are checked against sizes and SHA-256 hashes in `resources/media-tools.json`. Their licenses and source/build links accompany the installed tools. `scripts/fetch-media-tools.ps1` populates the development cache; helpers can also reside beside the app in `tools` or on PATH. Initial packaging requires network access.
 
-101 Downloader embeds GPUI's **PerMonitorV2** manifest, uses native Segoe UI and opaque surfaces, and paints labels and editable text on **physical-pixel-aligned baselines**. `src/text.rs` wraps GPUI's normal text layout, preserving shaping, wrapping, glyph advances, and font size. Only the paint origin is adjusted; there is no texture scaling or global Windows setting change. A unit test checks alignment at 100%, 125%, 150%, 175%, and 200% scaling.
+### Transfer implementation
 
-These changes address avoidable scaling and baseline softness. They do not replace GPUI's grayscale rasterizer or guarantee identical appearance on every monitor and GPU.
+HTTP downloads probe with `Range: bytes=0-0` and request identity encoding. Parallel transfers require a valid `206 Content-Range`, a known size, and a strong ETag or Last-Modified validator. Non-overlapping ranges enter a shared queue with a target size of 4 MiB and at least the configured worker count. Workers reuse pooled connections and maintain separate part files.
 
-## Storage and scope
+Every range response is checked for size, encoding, range bounds, and validator consistency. Broken connections are retried up to three times from the actual saved length. Idle workers can split a slow range's remaining bytes after its writer stops and flushes. Resume probes compare size and validator before reusing parts. Completed parts are assembled in order and published without replacing an existing path.
 
-History and settings: `%LOCALAPPDATA%\101 Downloader\history.json` for new installs. Existing `%LOCALAPPDATA%\Strata\history.json` continues to be used when present, preserving downloads, settings and encrypted credentials through the rebrand. Partial files: `.strata-<id>.parts` inside each download's destination. Writes to history are atomic. The app holds a process lock to prevent two instances from editing the same history.
+Servers without range support, validators, or a known size use a single full-file transfer that restarts on resume. Parallel connections cannot increase the underlying connection's bandwidth.
 
-For portable storage or isolated testing, set `DOWNLOADER101_DATA_DIR` (the legacy `STRATA_DATA_DIR` alias still works) to a directory before launching. It changes the history/settings location, not the destination of existing downloads.
+### Storage and rendering
 
-Authenticated browser-cookie import and scheduling are outside this version. Filename recovery uses browser filename determination, Content-Disposition (including UTF-8 filename*), readable redirect URLs, and MIME extensions for temporary names. Later transfer headers are checked again before publishing the file. Meaningful browser-provided names and Metalink entry paths are retained, and existing files are never replaced. If neither browser nor server supplies an original name, that name cannot be reconstructed from arbitrary file bytes.
+New installations store history and settings in `%LOCALAPPDATA%\101 Downloader\history.json`. Existing `%LOCALAPPDATA%\Strata\history.json` remains supported. Partial data is stored in `.strata-<id>.parts` under the download destination. History writes are atomic, and a process lock prevents concurrent writers.
 
-## Checks
+`DOWNLOADER101_DATA_DIR` selects a portable or isolated history/settings directory; `STRATA_DATA_DIR` remains a legacy alias. Existing download destinations are unaffected.
 
-The local HTTP test server verifies simultaneous range requests and byte-for-byte assembly, ordinary full-file fallback, empty files, pause/resume across manager restart, remote file changes, malformed range rejection, collision protection, filename sanitation, and range partitioning. It never downloads test files from the public internet.
+The native interface uses Segoe UI, opaque surfaces, per-monitor DPI awareness, and physical-pixel-aligned text baselines. GPUI 0.2.2 uses DirectWrite grayscale antialiasing. The shared logo source is `assets/brand/mark.png`; `scripts/generate-icons.ps1` generates platform icon variants.
 
-Loopback transport tests verify WebDAV authentication, authenticated SOCKS5 with remote DNS, HTTP proxy routing, FTP anonymous/password authentication and REST resume, SFTP password/key authentication and resume, and Metalink mirror recovery after checksum failure. A real local BitTorrent seed verifies `.torrent` and magnet transfers and rechecking existing partial data. Host-key tests reject unknown, changed, and revoked keys. Credential tests check protected persistence and diagnostic redaction. The optional `ytdlp_download_pause_and_resume_are_byte_exact` test uses the pinned helper against a local media fixture; run it with `.\run.ps1 test -CargoArguments @('--test','downloads','ytdlp_download_pause_and_resume_are_byte_exact','--','--ignored','--exact')`.
+### Validation
 
-`node --test extension/background.test.js` checks capture ordering, failure recovery, capture-off behavior, private/unsafe URL exclusions, cancellation failures, and worker restart recovery. Rust also checks native-message framing, named-pipe handoff, filename/referrer forwarding, and rejecting a transfer when history cannot be persisted.
+```powershell
+.\run.ps1 test
+.\run.ps1 clippy
+node --test extension/background.test.js
+```
 
-Tray checks cover mouse and keyboard callback routing. The ignored `native_tray_hides_restores_and_cleans_up` test requires interactive Windows Explorer; it creates its own window and verifies native tray creation, restore, hide without destroying the window, and cleanup. It was also run successfully on Windows.
+Automated coverage includes byte-exact parallel assembly, range validation, connection reuse, slow-tail splitting, pause/resume, filename recovery, collision protection, deletion, rate limits, speed/ETA sampling, proxy authentication, FTP/SFTP/WebDAV, Metalink verification, local torrent/magnet transfers, torrent file selection, credential protection, and browser handoff recovery. Download fixtures use local servers.
 
-Earlier 0.1.x end-to-end verification used isolated Chromium and Brave profiles: a real browser download was handed through the native host to the app, the browser's copy was canceled after acceptance, and the app's 4 MiB file matched every source byte. With capture off, the next file completed in the browser without creating an app transfer. The popup rendered its live connected state without script errors. Brave was checked against the optimized release app.
+Optional tests require additional resources: `ytdlp_download_pause_and_resume_are_byte_exact` uses pinned media helpers, and `native_tray_hides_restores_and_cleans_up` requires interactive Windows Explorer. `scripts/test-installer.ps1` exercises installation, upgrade, uninstall, payloads, shortcuts, native registrations, and running-app protection. It requires an isolated Windows account without an existing installation or either product's Start menu shortcuts and writes diagnostics under `.tools/installer-test`.
 
-`scripts/test-installer.ps1` exercises the real setup EXE in a directory with spaces: running-app protection, install, repeat-install upgrade, runtime and extension payloads, Start menu shortcut, native host registrations, and uninstall. It starts the installed CLI and each media helper with a restricted PATH, checks that unrelated data remains, and verifies that a bridge registration belonging to a different installation survives. Use a Windows account without an existing installed Strata / 101 Downloader or either product's Start menu shortcuts; quit any running copy first. The test snapshots and restores existing native host registrations and leaves diagnostic logs under `.tools/installer-test`.
+Repository documentation is maintained in this README. Generated planning and release-note Markdown is excluded from version control; published release notes are available on GitHub Releases.
 
-The editable text input is adapted from GPUI's Apache-2.0 example; see `NOTICE` and `LICENSE-APACHE`.
+## Licensing
 
-Browser download-popup suppression follows the capture switch using the Chromium `downloads.ui` API. Reload the updated companion and approve its download-interface permission if requested. Disabling capture, handing a transfer back to the browser, or encountering a browser-only download restores the UI. The API controls all windows in the current browser profile; a simultaneous browser-only transfer can re-enable that UI. Forks without the API still hand off downloads.
-
-Filename and deletion regressions cover encoded and quoted server names, late headers, redirects, extension fallback, collisions, resume, Metalink paths, permanent cleanup, locked-file retry, interrupted deletion, and rejecting paths outside the recorded output directory. Caret and ETA tests cover blink timing and unknown-size/stalled transfers.
-The chunk-queue tests verify keep-alive TCP reuse with more chunks than workers, the connection limit, slow-tail splitting, and byte-exact resume after a split. The 0.2.0 native handoff is smoke-tested separately; current browser popup visuals and a full installer upgrade/uninstall cycle still need an interactive Windows check.
-
-Scrollable tables, Settings, and overflowing dialogs show draggable scrollbars. Mouse-wheel scrolling eases between positions; precise pixel scrolling stays direct. Windows animation preferences are respected. Settings keeps an orange border on its toolbar button while open.
+The project license is in `LICENSE`. The text input adapts GPUI's Apache-2.0 example; attribution is in `NOTICE` and `LICENSE-APACHE`. Bundled media helpers retain their upstream licenses and accompanying notices.
