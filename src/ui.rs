@@ -1,5 +1,6 @@
 use crate::input::TextInput;
 use crate::scroll::{BAR_WIDTH, ScrollState, scroll_area};
+use crate::speed::DownloadSpeed;
 use crate::torrent_tree::{self, TorrentNode};
 use crate::tray::Tray;
 use gpui::{prelude::*, *};
@@ -134,9 +135,7 @@ pub struct Strata {
     update_notice: Option<String>,
     directory: PathBuf,
     connections: usize,
-    rates: HashMap<u64, f64>,
-    previous: HashMap<u64, u64>,
-    sampled_at: Instant,
+    rates: HashMap<u64, DownloadSpeed>,
     queue_scroll: ScrollState,
     settings_scroll: ScrollState,
     add_scroll: ScrollState,
@@ -363,8 +362,6 @@ impl Strata {
             directory: settings.directory,
             connections: settings.connections,
             rates: HashMap::new(),
-            previous: HashMap::new(),
-            sampled_at: Instant::now(),
             queue_scroll: ScrollState::default(),
             settings_scroll: ScrollState::default(),
             add_scroll: ScrollState::default(),
@@ -378,7 +375,6 @@ impl Strata {
     }
 
     fn refresh(&mut self) {
-        let elapsed = self.sampled_at.elapsed().as_secs_f64();
         let previous_id = self.downloads.last().map(|d| d.id);
         self.downloads = self.manager.snapshots();
         self.checked
@@ -397,27 +393,14 @@ impl Strata {
             self.selection_anchor = Some(id);
             self.view = View::All;
         }
+        let now = Instant::now();
         for d in &self.downloads {
-            let old = self
-                .previous
-                .insert(d.id, d.downloaded)
-                .unwrap_or(d.downloaded);
-            let rate = if d.status == Status::Downloading {
-                d.downloaded.saturating_sub(old) as f64 / elapsed
-            } else {
-                0.
-            };
-            let prior = self.rates.get(&d.id).copied().unwrap_or(0.);
-            self.rates.insert(
-                d.id,
-                if rate == 0. && d.status != Status::Downloading {
-                    0.
-                } else {
-                    prior * 0.45 + rate * 0.55
-                },
+            self.rates.entry(d.id).or_default().update(
+                now,
+                d.downloaded,
+                d.status == Status::Downloading,
             );
         }
-        self.sampled_at = Instant::now();
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1128,7 +1111,6 @@ impl Strata {
                 for id in self.action_ids(id) {
                     self.manager.delete(id);
                     self.rates.remove(&id);
-                    self.previous.remove(&id);
                 }
             }
             MenuAction::Rename(id) => {
@@ -1445,7 +1427,7 @@ impl Strata {
     fn row(&self, d: &Download, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = d.id;
         let selected = self.checked.contains(&id);
-        let rate = self.rates.get(&id).copied().unwrap_or(0.);
+        let rate = self.rates.get(&id).map_or(0., DownloadSpeed::rate);
         let color = status_color(d.status);
         table_row()
             .id(ElementId::Name(format!("download-{id}").into()))
@@ -1966,7 +1948,7 @@ impl Strata {
             );
         };
         let id = d.id;
-        let rate = self.rates.get(&id).copied().unwrap_or(0.);
+        let rate = self.rates.get(&id).map_or(0., DownloadSpeed::rate);
         let eta = if d.status == Status::Downloading {
             remaining_time(d.total, d.downloaded, rate)
         } else {

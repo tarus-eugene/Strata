@@ -18,6 +18,8 @@ Progress tracks keep a fixed physical layout height. New download is a centered 
 
 Empty states retain real zero counters. Filtered-empty states explain how to recover. History and partial files persist automatically. The UI reports background persistence errors visibly.
 
+Displayed speed and ETA use a roughly two-second rolling average with a minimum 250 ms between samples, so extra UI refreshes cannot cause short-interval spikes. Pausing clears the estimate immediately; stalled transfers settle to zero. Resumes, restarted byte counters, and long gaps begin a fresh estimate.
+
 Modal backgrounds fill the scrollbar gutter through to the border. Torrent metadata opens a file tree before payload downloads begin, including browser and CLI handoffs. Folder rows expand/collapse; their checkboxes select descendants and show partial selection. File checkboxes, Select all, selected count/size, keyboard navigation, and a visible scrollbar support large torrents. Cancel pauses the job; Resume reopens the picker. Double-clicking a completed table entry opens its downloaded file or folder.
 
 Both the custom close button and native close requests hide the existing window to the system tray. Transfers and browser handoffs continue. The shared 101 Downloader icon restores the window on selection and exposes a native Open/Quit menu; only Quit pauses transfers and exits. Starting 101 Downloader again or choosing Open app from the extension restores the same window.

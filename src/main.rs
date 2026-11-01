@@ -4,6 +4,7 @@ mod brand;
 mod datetime;
 mod input;
 mod scroll;
+mod speed;
 mod text;
 mod torrent_tree;
 mod tray;
