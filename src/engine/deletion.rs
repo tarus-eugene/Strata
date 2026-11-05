@@ -72,7 +72,21 @@ impl Manager {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             let download = job.data.lock().unwrap().clone();
-            let result = tokio::task::spawn_blocking(move || delete_data(&download)).await;
+            let cache = manager.torrent_metadata_path(id);
+            let result = tokio::task::spawn_blocking(move || {
+                delete_data(&download)?;
+                if download.protocol == Protocol::Torrent {
+                    match fs::remove_file(cache) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).context("Cannot remove saved torrent metadata");
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await;
             match result
                 .context("File deletion worker stopped")
                 .and_then(|result| result)

@@ -4,7 +4,7 @@ A native Windows download manager built with Rust and GPUI. Downloads run in a p
 
 ## Installation
 
-Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.2-x64.exe`.
+Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.3-x64.exe`.
 
 The installer supports Windows 10 version 2004 or later and Windows 11 on x64-compatible systems. A working GPU driver is required. Installation is per Windows account and does not require administrator access. The default location is `%LOCALAPPDATA%\Programs\101 Downloader`.
 
@@ -30,7 +30,11 @@ Up to three downloads run simultaneously. Settings provides a destination folder
 
 The bottom details panel shows the selected download's destination, source, completion time, priority, limit, and segmented progress. Its divider supports dragging and **Up/Down** keyboard resizing; the height is remembered. The footer chevron collapses or restores the panel. Tables, Settings, and overflowing dialogs have draggable scrollbars. Smooth wheel scrolling respects Windows animation preferences.
 
-The **Created** column and **Completed at** details use Windows date and local-time preferences, including the system's 12/24-hour setting. Older completed entries without a saved completion timestamp show a dash. Displayed speed and ETA use a roughly two-second rolling average to reduce fluctuations caused by short sampling intervals and batched progress updates. Unknown-size and stopped transfers have no ETA.
+The **Created** column and **Completed at** details use Windows date and local-time preferences, including the system's 12/24-hour setting. Older completed entries without a saved completion timestamp show a dash. Speed and ETA use a six-second rolling window, time-based smoothing, and at most one speed update per second. Estimates warm up for two seconds; a three-second stall clears stale speed and ETA. Unknown-size and stopped transfers have no ETA. Search highlights matching filename text and shows matching websites beneath filenames.
+
+New downloads save SHA-256 fingerprints for every output file. Direct transfers verify the assembled file against the downloaded parts before publishing; Metalink checks publisher hashes and torrents verify pieces. **Verify integrity** checks saved fingerprints again, including same-size corruption. Fingerprints for sources without publisher checksums detect later local changes; they do not authenticate the publisher's original. Older downloads without fingerprints cannot be checked against an original local checksum.
+
+Completed downloads become **Missing** when the file, output folder, or a recorded file inside it disappears. Checks run in the background and at startup. Returning the output to its saved location restores its completed status; **Verify integrity** can then check its bytes.
 
 ### Speed limits
 
@@ -43,6 +47,8 @@ Under a global cap, FTP, video, torrent, and Metalink jobs run exclusively so th
 Torrents load metadata before presenting an expandable file tree. Folder checkboxes select descendants and display partial-selection states; individual file checkboxes and **Select all** control the selection. The dialog shows the selected file count and total size. Payload downloading starts only after confirmation.
 
 Canceling the picker leaves the job paused; Resume reopens it. Confirmed choices persist across restarts. Only selected files are published, and empty unselected folders are removed. The same selection flow applies to browser and CLI handoffs. Native torrents upload while active and stop seeding on completion or pause. Resume rechecks existing pieces.
+
+The torrent context menu's **Options** action reopens file selection after a transfer stops or completes. Previous selections remain selected. Adding files stages existing payloads privately for piece verification and reuse, downloads the additional selection, and publishes the expanded folder at the same destination.
 
 ### Tray and updates
 

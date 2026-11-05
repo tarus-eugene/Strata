@@ -57,6 +57,8 @@ enum MenuAction {
     Folder(u64),
     Copy(u64),
     Open(u64),
+    Verify(u64),
+    Options(u64),
     Rename(u64),
     SpeedLimit(u64),
     Priority(u64),
@@ -79,6 +81,7 @@ enum Icon {
     Settings,
     Close,
     Arrow,
+    Flag,
     Link,
     Copy,
     Filter,
@@ -441,11 +444,7 @@ impl Strata {
 
     fn show_pending_torrent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.torrent_picker {
-            if !self
-                .downloads
-                .iter()
-                .any(|d| d.id == id && d.status == Status::SelectingFiles)
-            {
+            if !self.downloads.iter().any(|d| d.id == id) {
                 self.torrent_picker = None;
                 self.focus.focus(window);
                 cx.notify();
@@ -455,13 +454,25 @@ impl Strata {
         if self.adding || self.edit.is_some() || self.menu.is_some() {
             return;
         }
-        if let Some(download) = self
+        if let Some(id) = self
             .downloads
             .iter()
             .find(|d| d.status == Status::SelectingFiles)
+            .map(|download| download.id)
         {
-            self.torrent_picker = Some(download.id);
-            self.torrent_checked = (0..download.torrent_files.len()).collect();
+            self.open_torrent_options(id, window, cx);
+        }
+    }
+
+    fn open_torrent_options(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(download) = self.downloads.iter().find(|d| d.id == id) {
+            self.menu = None;
+            self.torrent_picker = Some(id);
+            self.torrent_checked = download
+                .selected_files
+                .as_ref()
+                .map(|files| files.iter().copied().collect())
+                .unwrap_or_else(|| (0..download.torrent_files.len()).collect());
             let (tree, nodes) = torrent_tree::tree(&download.torrent_files);
             self.torrent_expanded = tree
                 .iter()
@@ -531,6 +542,14 @@ impl Strata {
                 .collect()
         };
         torrent_tree::toggle(&files, &mut self.torrent_checked);
+        if let Some(selected) = self
+            .downloads
+            .iter()
+            .find(|d| Some(d.id) == self.torrent_picker)
+            .and_then(|download| download.selected_files.as_ref())
+        {
+            self.torrent_checked.extend(selected);
+        }
         self.torrent_error = None;
         cx.notify();
     }
@@ -649,11 +668,13 @@ impl Strata {
                 let view = match self.view {
                     View::All => true,
                     View::Active => d.status.active() || d.status == Status::Queued,
-                    View::Finished => d.status == Status::Complete,
-                    View::Paused => matches!(
-                        d.status,
-                        Status::Paused | Status::Failed | Status::Cancelled
-                    ),
+                    View::Finished => matches!(d.status, Status::Complete | Status::Missing),
+                    View::Paused => {
+                        matches!(
+                            d.status,
+                            Status::Paused | Status::Failed | Status::Cancelled
+                        )
+                    }
                     View::Settings => false,
                 };
                 view && (d.name.to_lowercase().contains(&query) || d.host().contains(&query))
@@ -689,17 +710,30 @@ impl Strata {
         }
         if selected
             .iter()
-            .any(|d| matches!(d.status, Status::Paused | Status::Failed))
+            .any(|d| !d.owns_output && matches!(d.status, Status::Paused | Status::Failed))
         {
             actions.push(("Resume selected", Icon::Play, MenuAction::Resume(id)));
         }
         actions.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
-        actions.push(("Set priority", Icon::Arrow, MenuAction::Priority(id)));
+        actions.push(("Set priority", Icon::Flag, MenuAction::Priority(id)));
+        if selected.iter().any(|d| {
+            d.owns_output
+                && !d.integrity.is_empty()
+                && !d.status.active()
+                && d.status != Status::Deleting
+        }) {
+            actions.push(("Verify integrity", Icon::Check, MenuAction::Verify(id)));
+        }
         if selected.iter().any(|d| {
             !matches!(
                 d.status,
-                Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
-            )
+                Status::Complete
+                    | Status::Missing
+                    | Status::Cancelled
+                    | Status::Assembling
+                    | Status::Verifying
+                    | Status::Deleting
+            ) && !d.owns_output
         }) {
             actions.push(("Cancel selected", Icon::Close, MenuAction::Cancel(id)));
         }
@@ -1033,17 +1067,17 @@ impl Strata {
             Menu::Priority(id) => vec![
                 (
                     "High",
-                    Icon::Arrow,
+                    Icon::ChevronUp,
                     MenuAction::SetPriority(id, Priority::High),
                 ),
                 (
                     "Normal",
-                    Icon::Arrow,
+                    Icon::Flag,
                     MenuAction::SetPriority(id, Priority::Normal),
                 ),
                 (
                     "Low",
-                    Icon::Arrow,
+                    Icon::ChevronDown,
                     MenuAction::SetPriority(id, Priority::Low),
                 ),
             ],
@@ -1057,23 +1091,44 @@ impl Strata {
                     Status::Queued | Status::Connecting | Status::Downloading
                 ) {
                     items.push(("Pause", Icon::Pause, MenuAction::Pause(id)));
-                } else if matches!(d.status, Status::Paused | Status::Failed) {
+                } else if !d.owns_output && matches!(d.status, Status::Paused | Status::Failed) {
                     items.push(("Resume", Icon::Play, MenuAction::Resume(id)));
                 }
                 if d.status == Status::Complete {
                     items.push(("Open", Icon::Arrow, MenuAction::Open(id)));
+                }
+                if d.owns_output
+                    && !d.integrity.is_empty()
+                    && !d.status.active()
+                    && d.status != Status::Deleting
+                {
+                    items.push(("Verify integrity", Icon::Check, MenuAction::Verify(id)));
+                }
+                if d.protocol == strata::protocol::Protocol::Torrent
+                    && !d.torrent_files.is_empty()
+                    && !d.status.active()
+                    && d.status != Status::Queued
+                    && d.status != Status::Deleting
+                {
+                    items.push(("Options", Icon::Settings, MenuAction::Options(id)));
                 }
                 items.push(("Open folder", Icon::Folder, MenuAction::Folder(id)));
                 items.push(("Copy download link", Icon::Copy, MenuAction::Copy(id)));
                 if d.status != Status::Deleting {
                     items.push(("Rename", Icon::File, MenuAction::Rename(id)));
                     items.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
-                    items.push(("Set priority", Icon::Arrow, MenuAction::Priority(id)));
+                    items.push(("Set priority", Icon::Flag, MenuAction::Priority(id)));
                 }
                 if !matches!(
                     d.status,
-                    Status::Complete | Status::Cancelled | Status::Assembling | Status::Deleting
-                ) {
+                    Status::Complete
+                        | Status::Missing
+                        | Status::Cancelled
+                        | Status::Assembling
+                        | Status::Verifying
+                        | Status::Deleting
+                ) && !d.owns_output
+                {
                     items.push(("Cancel transfer", Icon::Close, MenuAction::Cancel(id)));
                 }
                 if d.status != Status::Deleting {
@@ -1101,6 +1156,15 @@ impl Strata {
                 for id in self.action_ids(id) {
                     self.manager.resume(id);
                 }
+            }
+            MenuAction::Verify(id) => {
+                for id in self.action_ids(id) {
+                    self.manager.verify_integrity(id);
+                }
+            }
+            MenuAction::Options(id) => {
+                self.open_torrent_options(id, window, cx);
+                return;
             }
             MenuAction::Cancel(id) => {
                 for id in self.action_ids(id) {
@@ -1326,19 +1390,20 @@ impl Strata {
                             )
                             .child(div().w(px(30.)).flex_shrink_0()),
                     )
-                    .child(
+                    .child(if files.is_empty() {
+                        self.empty(cx).flex_1().min_h_0().into_any_element()
+                    } else {
                         scroll_area(
                             "download-list",
                             &self.queue_scroll,
-                            div()
-                                .when(files.is_empty(), |d| d.child(self.empty(cx)))
-                                .children(files.iter().map(|d| self.row(d, cx))),
+                            div().children(files.iter().map(|d| self.row(d, cx))),
                             window,
                             cx.entity_id(),
                         )
                         .flex_1()
-                        .min_h_0(),
-                    ),
+                        .min_h_0()
+                        .into_any_element()
+                    }),
             )
     }
 
@@ -1454,10 +1519,32 @@ impl Strata {
                     .gap(px(10.))
                     .child(icon(Icon::File, 18., if selected { TEXT } else { FAINT }))
                     .child(
-                        label(d.name.clone(), 14., TEXT)
+                        div()
+                            .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .truncate(),
+                            .child(
+                                highlighted_label(d.name.clone(), 14., TEXT, &self.search_query)
+                                    .w_full()
+                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .truncate(),
+                            )
+                            .when(
+                                !self.search_query.is_empty()
+                                    && !crate::text::search_ranges(&d.host(), &self.search_query)
+                                        .is_empty(),
+                                |column| {
+                                    column.child(
+                                        highlighted_label(d.host(), 11., MUTED, &self.search_query)
+                                            .w_full()
+                                            .min_w_0()
+                                            .flex_shrink_0()
+                                            .truncate(),
+                                    )
+                                },
+                            ),
                     ),
             )
             .child(
@@ -1681,7 +1768,7 @@ impl Strata {
                         )
                         .child(label(&download.name, 13., MUTED).truncate())
                         .child(label(
-                            "Select files or folders. Expand folders to choose individual files.",
+                            if download.selected_files.is_some() { "Previously selected files stay selected. Choose more files to download." } else { "Select files or folders. Expand folders to choose individual files." },
                             13.,
                             MUTED,
                         ))
@@ -2521,11 +2608,32 @@ impl Render for ActionTooltip {
 }
 
 fn label(text: impl AsRef<str>, size: f32, color: u32) -> Div {
+    highlighted_label(text, size, color, "")
+}
+
+fn highlighted_label(text: impl AsRef<str>, size: f32, color: u32, query: &str) -> Div {
+    let highlights = crate::text::search_ranges(text.as_ref(), query)
+        .into_iter()
+        .map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    color: Some(rgb(BG).into()),
+                    background_color: Some(rgb(AMBER).into()),
+                    font_weight: Some(FontWeight::MEDIUM),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
     div()
         .text_size(px(size))
         .line_height(px((size * 1.4).round()))
         .text_color(rgb(color))
-        .child(crate::text::CrispText(text.as_ref().to_owned().into()))
+        .child(crate::text::CrispText(
+            text.as_ref().to_owned().into(),
+            highlights,
+        ))
 }
 
 fn table_row() -> Div {
@@ -2804,7 +2912,7 @@ fn status_color(status: Status) -> u32 {
     match status {
         Status::Downloading | Status::Complete => ACCENT,
         Status::Paused | Status::Pausing => AMBER,
-        Status::Failed => RED,
+        Status::Failed | Status::Missing => RED,
         _ => FAINT,
     }
 }
@@ -2919,6 +3027,18 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
                     vec![(5., 19.), (19., 5.)],
                     vec![(7., 5.), (19., 5.), (19., 17.)],
                 ],
+                Icon::Flag => vec![vec![
+                    (5., 22.),
+                    (5., 3.),
+                    (13., 3.),
+                    (13., 5.),
+                    (21., 5.),
+                    (18., 10.),
+                    (21., 15.),
+                    (13., 15.),
+                    (13., 13.),
+                    (5., 13.),
+                ]],
                 Icon::ChevronDown => vec![vec![(5., 8.), (12., 15.), (19., 8.)]],
                 Icon::ChevronUp => vec![vec![(5., 16.), (12., 9.), (19., 16.)]],
                 Icon::ChevronRight => vec![vec![(8., 5.), (15., 12.), (8., 19.)]],

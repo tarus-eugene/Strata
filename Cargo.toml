@@ -1,6 +1,6 @@
 [package]
 name = "strata"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "101 Downloader: a native parallel download manager built with GPUI"
 license = "MIT"
@@ -41,6 +41,10 @@ embed-resource = "3"
 
 [profile.dev]
 debug = 0
+
+# Keep large-file integrity checks fast in local builds.
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

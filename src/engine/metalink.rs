@@ -282,6 +282,7 @@ impl Manager {
                         speed_limit: parent.speed_limit,
                         torrent_files: Vec::new(),
                         selected_files: None,
+                        integrity: Vec::new(),
                     });
                 data.id = parent.id;
                 data.directory = work.clone();
@@ -350,7 +351,7 @@ impl Manager {
             );
             job.data.lock().unwrap().downloaded = completed;
         }
-        tools::publish_directory(job, &content)
+        tools::publish_directory(job, &content).await
     }
 }
 

@@ -134,6 +134,6 @@ impl Manager {
             size += fs::metadata(file)?.len();
         }
         job.data.lock().unwrap().downloaded = size;
-        tools::publish_directory(job, &content)
+        tools::publish_directory(job, &content).await
     }
 }

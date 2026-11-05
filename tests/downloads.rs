@@ -286,12 +286,64 @@ fn downloads_eight_ranges_concurrently_and_assembles_exact_bytes() {
         "Connections did not overlap"
     );
     assert_eq!(std::fs::read(d.path()).unwrap(), *server.bytes);
+    use sha2::Digest;
+    assert_eq!(d.integrity.len(), 1);
+    assert_eq!(d.integrity[0].size, server.bytes.len() as u64);
+    assert_eq!(
+        d.integrity[0].sha256,
+        format!("{:x}", sha2::Sha256::digest(&*server.bytes))
+    );
     assert!(!d.parts_dir().exists());
     assert!(
         d.completed_at
             .is_some_and(|completed| completed >= d.created)
     );
     manager.shutdown();
+}
+
+#[test]
+fn completed_downloads_detect_corruption_and_missing_files_across_restart() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(&server.url("/file.bin"), directory.path().into(), 8)
+        .unwrap();
+    let done = wait(&manager, id, |d| d.status == Status::Complete);
+    let mut corrupt = server.bytes.to_vec();
+    corrupt[0] ^= 1;
+    std::fs::write(done.path(), &corrupt).unwrap();
+    manager.verify_integrity(id);
+    let failed = wait(&manager, id, |d| d.status == Status::Failed);
+    assert!(failed.error.unwrap().contains("checksum mismatch"));
+    manager.resume(id);
+    assert_eq!(manager.snapshots()[0].status, Status::Failed);
+    assert_eq!(std::fs::read(done.path()).unwrap(), corrupt);
+    std::fs::write(done.path(), &*server.bytes).unwrap();
+    manager.verify_integrity(id);
+    wait(&manager, id, |d| d.status == Status::Complete);
+    std::fs::remove_file(done.path()).unwrap();
+    wait(&manager, id, |d| d.status == Status::Missing);
+    manager.shutdown();
+    drop(manager);
+
+    let restored = Manager::new(history.clone()).unwrap();
+    let saved = restored.snapshots().remove(0);
+    assert_eq!(saved.status, Status::Missing);
+    assert_eq!(saved.integrity[0].sha256, done.integrity[0].sha256);
+    restored.resume(id);
+    assert_eq!(restored.snapshots()[0].status, Status::Missing);
+    std::fs::write(done.path(), &*server.bytes).unwrap();
+    wait(&restored, id, |d| d.status == Status::Complete);
+    restored.shutdown();
+    drop(restored);
+    std::fs::remove_file(done.path()).unwrap();
+    let restored = Manager::new(history).unwrap();
+    assert_eq!(restored.snapshots()[0].status, Status::Missing);
+    restored.delete(id);
+    wait_removed(&restored, id);
+    restored.shutdown();
 }
 
 #[test]
@@ -812,6 +864,8 @@ fn ytdlp_download_pause_and_resume_are_byte_exact() {
         .collect::<Vec<_>>();
     assert_eq!(files.len(), 1);
     assert_eq!(std::fs::read(&files[0]).unwrap(), *server.bytes);
+    assert_eq!(done.integrity.len(), 1);
+    assert_eq!(done.integrity[0].size, server.bytes.len() as u64);
     assert!(!done.parts_dir().exists());
     manager.shutdown();
     assert!(server.requests.lock().unwrap().iter().any(|request| {
@@ -1046,6 +1100,15 @@ fn discovered_filenames_survive_resume_and_do_not_change_metalink_entry_paths() 
         std::fs::read(done.path().join("mirror-payload.pdf")).unwrap(),
         *server.bytes
     );
+    assert_eq!(done.integrity.len(), 1);
+    assert_eq!(
+        done.integrity[0].path,
+        std::path::Path::new("mirror-payload.pdf")
+    );
+    std::fs::remove_file(done.path().join("mirror-payload.pdf")).unwrap();
+    wait(&restored, id, |d| d.status == Status::Missing);
+    std::fs::write(done.path().join("mirror-payload.pdf"), &*server.bytes).unwrap();
+    wait(&restored, id, |d| d.status == Status::Complete);
     restored.delete(id);
     wait_removed(&restored, id);
     assert!(!done.path().exists());

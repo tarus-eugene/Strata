@@ -24,6 +24,7 @@ mod chunks;
 mod controls;
 mod deletion;
 mod ftp;
+mod integrity;
 mod metalink;
 mod naming;
 mod sftp;
@@ -31,6 +32,8 @@ mod tools;
 #[cfg(feature = "torrent-native")]
 mod torrent;
 mod video;
+
+pub use integrity::IntegrityFile;
 
 const RUN: u8 = 0;
 const PAUSE: u8 = 1;
@@ -47,7 +50,9 @@ pub enum Status {
     Pausing,
     Paused,
     Assembling,
+    Verifying,
     Complete,
+    Missing,
     Failed,
     Cancelled,
     Deleting,
@@ -63,7 +68,9 @@ impl Status {
             Self::Pausing => "Pausing",
             Self::Paused => "Paused",
             Self::Assembling => "Finishing",
+            Self::Verifying => "Verifying",
             Self::Complete => "Completed",
+            Self::Missing => "Missing",
             Self::Failed => "Failed",
             Self::Cancelled => "Cancelled",
             Self::Deleting => "Deleting",
@@ -72,7 +79,11 @@ impl Status {
     pub fn active(self) -> bool {
         matches!(
             self,
-            Self::Connecting | Self::Downloading | Self::Pausing | Self::Assembling
+            Self::Connecting
+                | Self::Downloading
+                | Self::Pausing
+                | Self::Assembling
+                | Self::Verifying
         )
     }
 }
@@ -160,6 +171,8 @@ pub struct Download {
     pub torrent_files: Vec<TorrentFile>,
     #[serde(default)]
     pub selected_files: Option<Vec<usize>>,
+    #[serde(default)]
+    pub integrity: Vec<IntegrityFile>,
 }
 
 impl Download {
@@ -170,7 +183,7 @@ impl Download {
         self.directory.join(format!(".strata-{}.parts", self.id))
     }
     pub fn fraction(&self) -> f32 {
-        if self.status == Status::Complete {
+        if matches!(self.status, Status::Complete | Status::Missing) {
             return 1.;
         }
         self.total.filter(|n| *n > 0).map_or(0., |n| {
@@ -275,8 +288,17 @@ impl Manager {
         let jobs = downloads
             .into_iter()
             .map(|mut data| {
-                if data.status == Status::Complete {
+                if matches!(data.status, Status::Complete | Status::Missing) {
                     data.owns_output = true;
+                    integrity::refresh_missing(&mut data);
+                }
+                if data.status == Status::Verifying && data.owns_output {
+                    data.status = Status::Complete;
+                    integrity::refresh_missing(&mut data);
+                    if data.status == Status::Complete {
+                        data.status = Status::Failed;
+                        data.error = Some("Integrity verification was interrupted. Choose Verify integrity to check again.".into());
+                    }
                 }
                 if data.status == Status::Deleting {
                     data.status = Status::Failed;
@@ -340,7 +362,14 @@ impl Manager {
                 let Some(manager) = weak.upgrade() else {
                     break;
                 };
-                manager.persist();
+                let _ = tokio::task::spawn_blocking(move || {
+                    manager.refresh_missing();
+                    let _guard = manager.save_lock.lock().unwrap();
+                    if !manager.quitting.load(Ordering::SeqCst) {
+                        manager.persist_locked();
+                    }
+                })
+                .await;
             }
         });
         Ok(manager)
@@ -512,6 +541,7 @@ impl Manager {
                 speed_limit: 0,
                 torrent_files: Vec::new(),
                 selected_files: None,
+                integrity: Vec::new(),
             }),
             control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
@@ -548,7 +578,12 @@ impl Manager {
             {
                 return;
             }
-            if matches!(data.status, Status::Complete | Status::Cancelled) {
+            if data.owns_output
+                || matches!(
+                    data.status,
+                    Status::Complete | Status::Missing | Status::Cancelled
+                )
+            {
                 return;
             }
             if data.protocol == Protocol::Torrent
@@ -573,7 +608,7 @@ impl Manager {
             .try_lock()
             .context("Another download setting is being saved. Try again in a moment.")?;
         let job = self.find(id).context("This download no longer exists")?;
-        let previous = {
+        let (previous, staged) = {
             let mut data = job.data.lock().unwrap();
             ensure!(
                 !self.quitting.load(Ordering::SeqCst)
@@ -584,8 +619,15 @@ impl Manager {
             );
             ensure!(
                 data.protocol == Protocol::Torrent
-                    && data.selected_files.is_none()
-                    && matches!(data.status, Status::SelectingFiles | Status::Paused),
+                    && matches!(
+                        data.status,
+                        Status::SelectingFiles
+                            | Status::Paused
+                            | Status::Complete
+                            | Status::Missing
+                            | Status::Failed
+                            | Status::Cancelled
+                    ),
                 "This download is not waiting for file selection"
             );
             ensure!(
@@ -600,8 +642,31 @@ impl Manager {
             );
             selected.sort_unstable();
             selected.dedup();
-            job.editing.store(true, Ordering::SeqCst);
+            if let Some(previous) = &data.selected_files {
+                ensure!(
+                    previous.iter().all(|index| selected.contains(index)),
+                    "Previously selected files must remain selected."
+                );
+                if data.status == Status::Complete && previous == &selected {
+                    return Ok(());
+                }
+            }
             let previous = data.clone();
+            let staged = if data.owns_output && data.path().try_exists()? {
+                let metadata = fs::symlink_metadata(data.path())?;
+                ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "The torrent output must be a regular folder"
+                );
+                fs::create_dir_all(data.parts_dir())?;
+                let staged = data.parts_dir().join("content");
+                controls::move_without_replacing(&data.path(), &staged)
+                    .context("Cannot stage the existing torrent files")?;
+                Some(staged)
+            } else {
+                None
+            };
+            job.editing.store(true, Ordering::SeqCst);
             data.total = Some(
                 selected
                     .iter()
@@ -609,11 +674,23 @@ impl Manager {
                     .sum(),
             );
             data.selected_files = Some(selected);
+            data.owns_output = false;
+            data.integrity.clear();
+            data.completed_at = None;
             data.status = Status::Paused;
-            previous
+            (previous, staged)
         };
         self.persist();
         if let Some(error) = self.persistence_error.lock().unwrap().clone() {
+            if let Some(staged) = staged {
+                if let Err(rollback) = controls::move_without_replacing(&staged, &previous.path()) {
+                    job.editing.store(false, Ordering::SeqCst);
+                    bail!(
+                        "{error}. Existing files remain in {} because restoring the output failed: {rollback:#}",
+                        staged.display()
+                    );
+                }
+            }
             *job.data.lock().unwrap() = previous;
             job.editing.store(false, Ordering::SeqCst);
             bail!(error);
@@ -646,7 +723,12 @@ impl Manager {
             if job.deleting.load(Ordering::SeqCst) {
                 return;
             }
-            if d.status == Status::Complete || d.status == Status::Assembling {
+            if d.owns_output
+                || matches!(
+                    d.status,
+                    Status::Complete | Status::Missing | Status::Assembling | Status::Verifying
+                )
+            {
                 return;
             }
             job.control.store(CANCEL, Ordering::SeqCst);
@@ -701,6 +783,12 @@ impl Manager {
         *self.persistence_error.lock().unwrap() = result
             .err()
             .map(|e| format!("Could not save history: {e:#}"));
+    }
+
+    fn torrent_metadata_path(&self, id: u64) -> PathBuf {
+        self.history
+            .with_file_name("torrent-metadata")
+            .join(format!("{id}.torrent"))
     }
 
     fn find(&self, id: u64) -> Option<Arc<Job>> {
@@ -924,27 +1012,28 @@ impl Manager {
             d.total.is_none_or(|n| n == d.downloaded),
             "Downloaded size does not match the server's file size"
         );
-        job.data.lock().unwrap().status = Status::Assembling;
-        // persist_noclobber prevents replacing a file created after this transfer was added.
-        let output = tempfile::NamedTempFile::new_in(&d.directory)?;
-        let mut writer = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(output.path())
-            .await?;
-        for i in ordered {
-            let mut part = tokio::fs::File::open(dir.join(format!("{i}.part"))).await?;
-            tokio::io::copy(&mut part, &mut writer).await?;
+        for &index in &ordered {
+            ensure!(
+                fs::metadata(dir.join(format!("{index}.part")))?.len() == d.parts[index].downloaded,
+                "A downloaded part no longer matches its recorded size"
+            );
         }
-        writer.flush().await?;
-        writer.sync_all().await?;
-        drop(writer);
-        output.persist_noclobber(d.path()).context("Cannot save the finished file. A file with this name may already exist; move it and retry.")?;
+        job.data.lock().unwrap().status = Status::Assembling;
+        let integrity = tools::assemble_files(
+            ordered
+                .into_iter()
+                .map(|i| dir.join(format!("{i}.part")))
+                .collect(),
+            d.path(),
+        )
+        .await?;
         {
             let mut data = job.data.lock().unwrap();
             data.total = Some(data.downloaded);
             data.status = Status::Complete;
             data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
             data.owns_output = true;
+            data.integrity = vec![integrity];
             data.error = None;
         }
         // This directory is exclusively owned by this transfer and contains only its parts.

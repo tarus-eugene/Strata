@@ -195,6 +195,8 @@ fn ftp_anonymous_authenticated_and_rest_resume_are_byte_exact() {
     });
     assert_eq!(done.status, Status::Complete, "{:?}", done.error);
     assert_eq!(std::fs::read(done.path()).unwrap(), *server.bytes);
+    assert_eq!(done.integrity.len(), 1);
+    assert_eq!(done.integrity[0].size, server.bytes.len() as u64);
     assert!(
         server
             .offsets
@@ -455,6 +457,8 @@ fn sftp_password_key_authentication_and_seek_resume_preserve_bytes() {
     });
     assert_eq!(done.status, Status::Complete, "{:?}", done.error);
     assert_eq!(std::fs::read(done.path()).unwrap(), *bytes);
+    assert_eq!(done.integrity.len(), 1);
+    assert_eq!(done.integrity[0].size, bytes.len() as u64);
     assert!(
         offsets
             .lock()

@@ -63,7 +63,7 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn move_without_replacing(from: &Path, to: &Path) -> Result<()> {
+pub(super) fn move_without_replacing(from: &Path, to: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -91,8 +91,13 @@ fn move_without_replacing(from: &Path, to: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        fs::hard_link(from, to)?;
-        fs::remove_file(from)?;
+        if from.is_dir() {
+            ensure!(!to.try_exists()?, "The destination already exists");
+            fs::rename(from, to)?;
+        } else {
+            fs::hard_link(from, to)?;
+            fs::remove_file(from)?;
+        }
     }
     Ok(())
 }

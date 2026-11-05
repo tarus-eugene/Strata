@@ -240,6 +240,44 @@ pub(super) fn update_file_progress(job: &Arc<Job>, bytes: u64) {
     }
 }
 
+pub(super) async fn assemble_files(
+    parts: Vec<PathBuf>,
+    destination: PathBuf,
+) -> Result<IntegrityFile> {
+    // Batch disk I/O on one worker instead of scheduling each small read and write separately.
+    tokio::task::spawn_blocking(move || -> Result<IntegrityFile> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        let directory = destination.parent().context("Missing download folder")?;
+        let mut output = tempfile::NamedTempFile::new_in(directory)?;
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut size = 0;
+        for path in parts {
+            let mut reader = fs::File::open(path)?;
+            let expected = reader.metadata()?.len();
+            let mut copied = 0;
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 { break; }
+                output.as_file_mut().write_all(&buffer[..count])?;
+                hash.update(&buffer[..count]);
+                copied += count as u64;
+            }
+            ensure!(copied == expected, "A download part changed during assembly");
+            size += copied;
+        }
+        output.as_file().sync_all()?;
+        let fingerprint = IntegrityFile { path: PathBuf::new(), size, sha256: format!("{:x}", hash.finalize()) };
+        integrity::verify(output.path(), std::slice::from_ref(&fingerprint))?;
+        output.persist_noclobber(destination).context(
+            "Cannot save the finished file. A file with this name may already exist; move it and retry.",
+        )?;
+        Ok(fingerprint)
+    })
+    .await?
+}
+
 pub(super) async fn finish_file(job: &Arc<Job>, path: &Path) -> Result<()> {
     check_running(job)?;
     let size = fs::metadata(path)?.len();
@@ -249,20 +287,7 @@ pub(super) async fn finish_file(job: &Arc<Job>, path: &Path) -> Result<()> {
         "The server's file size does not match the downloaded file"
     );
     job.data.lock().unwrap().status = Status::Assembling;
-    let output = tempfile::NamedTempFile::new_in(&d.directory)?;
-    let mut writer = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(output.path())
-        .await?;
-    let mut source = tokio::fs::File::open(path).await?;
-    tokio::io::copy(&mut source, &mut writer).await?;
-    writer.flush().await?;
-    writer.sync_all().await?;
-    drop(source);
-    drop(writer);
-    output
-        .persist_noclobber(d.path())
-        .context("A destination file already exists; move it before retrying")?;
+    let integrity = assemble_files(vec![path.to_owned()], d.path()).await?;
     let _ = fs::remove_file(path);
     let _ = fs::remove_dir(d.parts_dir());
     {
@@ -272,14 +297,27 @@ pub(super) async fn finish_file(job: &Arc<Job>, path: &Path) -> Result<()> {
         data.status = Status::Complete;
         data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
         data.owns_output = true;
+        data.integrity = vec![integrity];
         data.error = None;
     }
     Ok(())
 }
 
-pub(super) fn publish_directory(job: &Arc<Job>, source: &Path) -> Result<()> {
+pub(super) async fn publish_directory(job: &Arc<Job>, source: &Path) -> Result<()> {
     check_running(job)?;
     let d = job.data.lock().unwrap().clone();
+    job.data.lock().unwrap().status = Status::Verifying;
+    let root = source.to_owned();
+    let integrity = tokio::task::spawn_blocking(move || integrity::capture(&root)).await??;
+    let size = integrity
+        .iter()
+        .try_fold(0_u64, |sum, file| sum.checked_add(file.size))
+        .context("Download size is too large")?;
+    ensure!(
+        d.total.is_none_or(|total| total == size),
+        "Downloaded files do not match the expected total size"
+    );
+    check_running(job)?;
     job.data.lock().unwrap().status = Status::Assembling;
     #[cfg(windows)]
     unsafe {
@@ -306,10 +344,12 @@ pub(super) fn publish_directory(job: &Arc<Job>, source: &Path) -> Result<()> {
     }
     let _ = fs::remove_dir_all(d.parts_dir());
     let mut data = job.data.lock().unwrap();
-    data.total = Some(data.downloaded);
+    data.total = Some(size);
+    data.downloaded = size;
     data.status = Status::Complete;
     data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     data.owns_output = true;
+    data.integrity = integrity;
     data.error = None;
     Ok(())
 }
@@ -361,6 +401,99 @@ pub(super) fn args(values: &[&str]) -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "manual disk benchmark: copies 256 MiB twice"]
+    async fn assembly_throughput() {
+        use std::{io::Write, time::Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let mut parts = Vec::new();
+        let buffer = vec![0x5a; 1024 * 1024];
+        for i in 0..4 {
+            let path = directory.path().join(format!("{i}.part"));
+            let mut file = fs::File::create(&path).unwrap();
+            for _ in 0..64 {
+                file.write_all(&buffer).unwrap();
+            }
+            file.sync_all().unwrap();
+            parts.push(path);
+        }
+        let started = Instant::now();
+        let mut old = tokio::fs::File::create(directory.path().join("old.bin"))
+            .await
+            .unwrap();
+        for path in &parts {
+            let mut source = tokio::fs::File::open(path).await.unwrap();
+            tokio::io::copy(&mut source, &mut old).await.unwrap();
+        }
+        old.flush().await.unwrap();
+        old.sync_all().await.unwrap();
+        let old_elapsed = started.elapsed();
+        let started = Instant::now();
+        let destination = directory.path().join("new.bin");
+        assemble_files(parts, destination.clone()).await.unwrap();
+        let new_elapsed = started.elapsed();
+        assert_eq!(fs::metadata(destination).unwrap().len(), 256 * 1024 * 1024);
+        eprintln!("256 MiB assembly: old={old_elapsed:?}, new={new_elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn assembly_preserves_order_across_buffers_and_handles_empty_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("1.part");
+        let second = directory.path().join("0.part");
+        let empty = directory.path().join("empty.part");
+        let destination = directory.path().join("finished.bin");
+        let mut expected = (0..2 * 1024 * 1024 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&first, &expected).unwrap();
+        fs::write(&second, b"last bytes").unwrap();
+        fs::write(&empty, []).unwrap();
+        assemble_files(vec![first, empty.clone(), second], destination.clone())
+            .await
+            .unwrap();
+        expected.extend_from_slice(b"last bytes");
+        assert_eq!(fs::read(destination).unwrap(), expected);
+
+        let destination = directory.path().join("empty.bin");
+        assemble_files(vec![empty], destination.clone())
+            .await
+            .unwrap();
+        assert_eq!(fs::metadata(destination).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn assembly_failure_keeps_parts_and_never_overwrites_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let part = directory.path().join("0.part");
+        let missing = directory.path().join("missing.part");
+        let destination = directory.path().join("finished.bin");
+        fs::write(&part, b"downloaded bytes").unwrap();
+        assert!(
+            assemble_files(vec![part.clone(), missing], destination.clone())
+                .await
+                .is_err()
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+
+        fs::write(&destination, b"keep me").unwrap();
+        assert!(
+            assemble_files(vec![part.clone()], destination.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"keep me");
+        assert_eq!(fs::read(&part).unwrap(), b"downloaded bytes");
+        fs::remove_file(&destination).unwrap();
+        assemble_files(vec![part], destination.clone())
+            .await
+            .unwrap();
+        assert_eq!(fs::read(destination).unwrap(), b"downloaded bytes");
+    }
+
     #[test]
     fn curl_config_escapes_quotes_and_line_breaks() {
         assert_eq!(super::config_value("a\"\nb\\c"), "\"a\\\"\\nb\\\\c\"");

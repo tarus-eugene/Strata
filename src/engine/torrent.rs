@@ -4,12 +4,25 @@ use librqbit::{
     api::TorrentIdOrHash,
 };
 
+fn save_metadata(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.try_exists()? {
+        return Ok(());
+    }
+    fs::create_dir_all(path.parent().context("Missing torrent metadata folder")?)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+    std::io::Write::write_all(&mut temporary, bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist_noclobber(path)?;
+    Ok(())
+}
+
 impl Manager {
     pub(super) async fn execute_torrent(&self, job: &Arc<Job>) -> Result<()> {
         let d = job.data.lock().unwrap().clone();
         let content = d.parts_dir().join("content");
         fs::create_dir_all(d.parts_dir())?;
-        let cache = d.parts_dir().join("metadata.torrent");
+        let cache = self.torrent_metadata_path(d.id);
+        let legacy_cache = d.parts_dir().join("metadata.torrent");
         let session = self
             .torrent_session
             .get_or_try_init(|| async {
@@ -33,6 +46,8 @@ impl Manager {
         let magnet = d.url.starts_with("magnet:");
         let add = if cache.is_file() {
             AddTorrent::from_bytes(tokio::fs::read(&cache).await?)
+        } else if legacy_cache.is_file() {
+            AddTorrent::from_bytes(tokio::fs::read(&legacy_cache).await?)
         } else if magnet {
             AddTorrent::from_url(&d.url)
         } else {
@@ -70,7 +85,7 @@ impl Manager {
                     })
                     .collect::<Vec<_>>();
                 ensure!(!files.is_empty(), "This torrent contains no files");
-                fs::write(&cache, &metadata.torrent_bytes)?;
+                save_metadata(&cache, &metadata.torrent_bytes)?;
                 let mut data = job.data.lock().unwrap();
                 data.torrent_files = files;
                 data.status = Status::SelectingFiles;
@@ -90,7 +105,7 @@ impl Manager {
                 let expected = librqbit::Magnet::parse(&d.url)?.as_id20().context("A BitTorrent v1 / hybrid info hash is required")?;
                 ensure!(handle.info_hash() == expected, "Cached torrent metadata does not match the magnet link");
             }
-            if let Some(metadata) = handle.metadata.load_full() { fs::write(&cache, &metadata.torrent_bytes)?; }
+            if let Some(metadata) = handle.metadata.load_full() { save_metadata(&cache, &metadata.torrent_bytes)?; }
             // Unpausing before the initial piece check finishes leaves the torrent paused.
             tokio::select! { result = handle.wait_until_initialized() => result?, _ = stopped(job) => bail!("Transfer stopped") }
             session.unpause(&handle).await?;
@@ -153,7 +168,7 @@ impl Manager {
                 }
             }
         }
-        tools::publish_directory(job, &content)
+        tools::publish_directory(job, &content).await
     }
 }
 
@@ -382,6 +397,56 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(30)).await;
             }
         }
+        while manager.find(id).unwrap().running.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let completed = manager
+            .snapshots()
+            .into_iter()
+            .find(|download| download.id == id)
+            .unwrap();
+        assert_eq!(completed.integrity.len(), 1);
+        assert!(manager.torrent_metadata_path(id).is_file());
+        fs::remove_file(&descriptor).unwrap();
+        let additional = completed
+            .torrent_files
+            .iter()
+            .position(|file| file.name.ends_with("unselected.bin"))
+            .unwrap();
+        assert!(manager.select_torrent_files(id, vec![additional]).is_err());
+        let all_files = (0..completed.torrent_files.len()).collect();
+        assert!(
+            manager
+                .select_torrent_files(id, vec![completed.torrent_files.len()])
+                .is_err()
+        );
+        manager.select_torrent_files(id, all_files).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let download = manager
+                .snapshots()
+                .into_iter()
+                .find(|download| download.id == id)
+                .unwrap();
+            if matches!(download.status, Status::Complete | Status::Failed) {
+                assert_eq!(download.status, Status::Complete, "{:?}", download.error);
+                assert_eq!(
+                    fs::read(download.path().join("payload.bin")).unwrap(),
+                    payload
+                );
+                assert_eq!(
+                    fs::read(download.path().join("excluded/unselected.bin")).unwrap(),
+                    vec![7; 512 * 1024 + 123]
+                );
+                assert_eq!(download.integrity.len(), 2);
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Additional torrent selections timed out: {download:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
         let id = manager
             .add(
                 &metadata.as_magnet().to_string(),
@@ -409,6 +474,17 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
+        let cache = manager.torrent_metadata_path(id);
+        manager.delete(id);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while manager.find(id).is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Torrent deletion timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!cache.exists());
         manager.shutdown();
         client.stop().await;
         seed.stop().await;
