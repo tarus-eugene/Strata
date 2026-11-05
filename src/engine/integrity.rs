@@ -126,6 +126,35 @@ fn missing(data: &Download) -> bool {
             .any(|file| output_path(&path, &file.path).is_ok_and(|path| missing_path(&path, false)))
 }
 
+fn initial_baseline(download: &Download) -> Result<Vec<IntegrityFile>> {
+    let files = capture(&download.path())?;
+    let actual_size = files
+        .iter()
+        .try_fold(0_u64, |sum, file| sum.checked_add(file.size))
+        .context("Download size is too large")?;
+    let expected_size = download
+        .total
+        .or((download.downloaded > 0).then_some(download.downloaded));
+    ensure!(
+        expected_size.is_none_or(|expected| actual_size == expected),
+        "Integrity verification failed: the files do not match the recorded download size"
+    );
+    if download.protocol == Protocol::Torrent {
+        for &index in download.selected_files.as_deref().unwrap_or_default() {
+            let expected = download
+                .torrent_files
+                .get(index)
+                .context("Invalid saved torrent selection")?;
+            let path = output_path(&download.path(), Path::new(&expected.name))?;
+            ensure!(
+                fs::metadata(path)?.len() == expected.size,
+                "Integrity verification failed: a torrent file does not match its recorded size"
+            );
+        }
+    }
+    Ok(files)
+}
+
 pub(super) fn refresh_missing(data: &mut Download) {
     if matches!(data.status, Status::Complete | Status::Missing) {
         if missing(data) {
@@ -169,7 +198,7 @@ impl Manager {
         };
         let snapshot = {
             let mut data = job.data.lock().unwrap();
-            if !data.owns_output
+            if !data.can_verify_integrity()
                 || job.running.load(Ordering::SeqCst)
                 || job.editing.load(Ordering::SeqCst)
                 || job.deleting.load(Ordering::SeqCst)
@@ -186,14 +215,25 @@ impl Manager {
         self.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let is_missing = missing(&snapshot);
-                (is_missing, verify(&snapshot.path(), &snapshot.integrity))
+                let result = if is_missing {
+                    Ok(None)
+                } else if snapshot.integrity.is_empty() {
+                    initial_baseline(&snapshot).map(Some)
+                } else {
+                    verify(&snapshot.path(), &snapshot.integrity).map(|_| None)
+                };
+                (is_missing, result)
             })
             .await;
             {
                 let mut data = job.data.lock().unwrap();
                 if !job.deleting.load(Ordering::SeqCst) {
                     match result {
-                        Ok((false, Ok(()))) => {
+                        Ok((false, Ok(baseline))) => {
+                            data.integrity_baseline_only = baseline.is_some();
+                            if let Some(files) = baseline {
+                                data.integrity = files;
+                            }
                             data.status = Status::Complete;
                             data.error = None;
                         }
@@ -214,8 +254,8 @@ impl Manager {
                         }
                     }
                 }
+                job.running.store(false, Ordering::SeqCst);
             }
-            job.running.store(false, Ordering::SeqCst);
             manager.persist();
         });
     }

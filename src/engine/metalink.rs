@@ -283,6 +283,7 @@ impl Manager {
                         torrent_files: Vec::new(),
                         selected_files: None,
                         integrity: Vec::new(),
+                        integrity_baseline_only: false,
                     });
                 data.id = parent.id;
                 data.directory = work.clone();

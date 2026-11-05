@@ -173,9 +173,16 @@ pub struct Download {
     pub selected_files: Option<Vec<usize>>,
     #[serde(default)]
     pub integrity: Vec<IntegrityFile>,
+    #[serde(default)]
+    pub integrity_baseline_only: bool,
 }
 
 impl Download {
+    pub fn can_verify_integrity(&self) -> bool {
+        self.owns_output
+            && !self.status.active()
+            && !matches!(self.status, Status::Queued | Status::Deleting)
+    }
     pub fn path(&self) -> PathBuf {
         self.directory.join(&self.name)
     }
@@ -297,7 +304,7 @@ impl Manager {
                     integrity::refresh_missing(&mut data);
                     if data.status == Status::Complete {
                         data.status = Status::Failed;
-                        data.error = Some("Integrity verification was interrupted. Choose Verify integrity to check again.".into());
+                        data.error = Some("Integrity verification was interrupted. Choose Verify file integrity to check again.".into());
                     }
                 }
                 if data.status == Status::Deleting {
@@ -542,6 +549,7 @@ impl Manager {
                 torrent_files: Vec::new(),
                 selected_files: None,
                 integrity: Vec::new(),
+                integrity_baseline_only: false,
             }),
             control: Arc::new(AtomicU8::new(RUN)),
             running: AtomicBool::new(false),
@@ -676,6 +684,7 @@ impl Manager {
             data.selected_files = Some(selected);
             data.owns_output = false;
             data.integrity.clear();
+            data.integrity_baseline_only = false;
             data.completed_at = None;
             data.status = Status::Paused;
             (previous, staged)
@@ -1034,6 +1043,7 @@ impl Manager {
             data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
             data.owns_output = true;
             data.integrity = vec![integrity];
+            data.integrity_baseline_only = false;
             data.error = None;
         }
         // This directory is exclusively owned by this transfer and contains only its parts.

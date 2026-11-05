@@ -298,6 +298,7 @@ pub(super) async fn finish_file(job: &Arc<Job>, path: &Path) -> Result<()> {
         data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
         data.owns_output = true;
         data.integrity = vec![integrity];
+        data.integrity_baseline_only = false;
         data.error = None;
     }
     Ok(())
@@ -350,6 +351,7 @@ pub(super) async fn publish_directory(job: &Arc<Job>, source: &Path) -> Result<(
     data.completed_at = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     data.owns_output = true;
     data.integrity = integrity;
+    data.integrity_baseline_only = d.protocol == Protocol::Video;
     data.error = None;
     Ok(())
 }

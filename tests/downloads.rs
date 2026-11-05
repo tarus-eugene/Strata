@@ -347,6 +347,68 @@ fn completed_downloads_detect_corruption_and_missing_files_across_restart() {
 }
 
 #[test]
+fn legacy_downloads_check_size_record_a_baseline_and_detect_later_corruption() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(&server.url("/file.bin"), directory.path().into(), 8)
+        .unwrap();
+    let done = wait(&manager, id, |d| d.status == Status::Complete);
+    manager.shutdown();
+    drop(manager);
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&history).unwrap()).unwrap();
+    stored["downloads"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("integrity");
+    stored["downloads"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("integrity_baseline_only");
+    std::fs::write(&history, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let restored = Manager::new(history).unwrap();
+    let legacy = restored.snapshots().remove(0);
+    assert!(legacy.integrity.is_empty());
+    assert!(legacy.can_verify_integrity());
+    for status in [
+        Status::Queued,
+        Status::Downloading,
+        Status::Verifying,
+        Status::Deleting,
+    ] {
+        let mut busy = legacy.clone();
+        busy.status = status;
+        assert!(!busy.can_verify_integrity());
+    }
+    std::fs::write(done.path(), b"truncated").unwrap();
+    restored.verify_integrity(id);
+    let failed = wait(&restored, id, |d| d.status == Status::Failed);
+    assert!(failed.error.unwrap().contains("recorded download size"));
+    std::fs::write(done.path(), &*server.bytes).unwrap();
+    restored.verify_integrity(id);
+    let baseline = wait(&restored, id, |d| d.status == Status::Complete);
+    assert!(baseline.integrity_baseline_only);
+    assert_eq!(baseline.integrity.len(), 1);
+    restored.verify_integrity(id);
+    let verified = wait(&restored, id, |d| d.status == Status::Complete);
+    assert!(!verified.integrity_baseline_only);
+    let mut corrupt = server.bytes.to_vec();
+    corrupt[0] ^= 1;
+    std::fs::write(done.path(), corrupt).unwrap();
+    restored.verify_integrity(id);
+    assert!(
+        wait(&restored, id, |d| d.status == Status::Failed)
+            .error
+            .unwrap()
+            .contains("checksum mismatch")
+    );
+    restored.shutdown();
+}
+
+#[test]
 fn local_and_global_speed_caps_preserve_bytes_and_active_rename_resumes() {
     use strata::engine::DownloadChange;
     let server = Server::new();

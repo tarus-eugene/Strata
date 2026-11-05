@@ -4,7 +4,7 @@ A native Windows download manager built with Rust and GPUI. Downloads run in a p
 
 ## Installation
 
-Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.3-x64.exe`.
+Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.4-x64.exe`.
 
 The installer supports Windows 10 version 2004 or later and Windows 11 on x64-compatible systems. A working GPU driver is required. Installation is per Windows account and does not require administrator access. The default location is `%LOCALAPPDATA%\Programs\101 Downloader`.
 
@@ -32,9 +32,9 @@ The bottom details panel shows the selected download's destination, source, comp
 
 The **Created** column and **Completed at** details use Windows date and local-time preferences, including the system's 12/24-hour setting. Older completed entries without a saved completion timestamp show a dash. Speed and ETA use a six-second rolling window, time-based smoothing, and at most one speed update per second. Estimates warm up for two seconds; a three-second stall clears stale speed and ETA. Unknown-size and stopped transfers have no ETA. Search highlights matching filename text and shows matching websites beneath filenames.
 
-New downloads save SHA-256 fingerprints for every output file. Direct transfers verify the assembled file against the downloaded parts before publishing; Metalink checks publisher hashes and torrents verify pieces. **Verify integrity** checks saved fingerprints again, including same-size corruption. Fingerprints for sources without publisher checksums detect later local changes; they do not authenticate the publisher's original. Older downloads without fingerprints cannot be checked against an original local checksum.
+New downloads save SHA-256 fingerprints for every output file. Direct transfers verify the assembled file against the downloaded parts before publishing; Metalink checks publisher hashes and torrents verify pieces. **Verify file integrity** in row context menus and selection actions checks saved fingerprints again, including same-size corruption. Fingerprints for sources without publisher checksums detect later local changes; they do not authenticate the publisher's original. For older downloads, the action checks recorded file sizes and saves an initial checksum. The details panel shows **Initial checksum recorded**; this first baseline cannot rule out earlier same-size corruption.
 
-Completed downloads become **Missing** when the file, output folder, or a recorded file inside it disappears. Checks run in the background and at startup. Returning the output to its saved location restores its completed status; **Verify integrity** can then check its bytes.
+Completed downloads become **Missing** when the file, output folder, or a recorded file inside it disappears. Checks run in the background and at startup. Returning the output to its saved location restores its completed status; **Verify file integrity** can then check its bytes.
 
 ### Speed limits
 

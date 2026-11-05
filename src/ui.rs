@@ -716,13 +716,8 @@ impl Strata {
         }
         actions.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
         actions.push(("Set priority", Icon::Flag, MenuAction::Priority(id)));
-        if selected.iter().any(|d| {
-            d.owns_output
-                && !d.integrity.is_empty()
-                && !d.status.active()
-                && d.status != Status::Deleting
-        }) {
-            actions.push(("Verify integrity", Icon::Check, MenuAction::Verify(id)));
+        if selected.iter().any(|d| d.can_verify_integrity()) {
+            actions.push(("Verify file integrity", Icon::Check, MenuAction::Verify(id)));
         }
         if selected.iter().any(|d| {
             !matches!(
@@ -1097,12 +1092,8 @@ impl Strata {
                 if d.status == Status::Complete {
                     items.push(("Open", Icon::Arrow, MenuAction::Open(id)));
                 }
-                if d.owns_output
-                    && !d.integrity.is_empty()
-                    && !d.status.active()
-                    && d.status != Status::Deleting
-                {
-                    items.push(("Verify integrity", Icon::Check, MenuAction::Verify(id)));
+                if d.can_verify_integrity() {
+                    items.push(("Verify file integrity", Icon::Check, MenuAction::Verify(id)));
                 }
                 if d.protocol == strata::protocol::Protocol::Torrent
                     && !d.torrent_files.is_empty()
@@ -2114,6 +2105,16 @@ impl Strata {
                             .flex_col()
                             .gap(px(5.))
                             .child(detail_line("Protocol", d.protocol.label()))
+                            .child(detail_line(
+                                "Integrity",
+                                if d.integrity.is_empty() {
+                                    "No saved checksum"
+                                } else if d.integrity_baseline_only {
+                                    "Initial checksum recorded"
+                                } else {
+                                    "SHA-256 checked"
+                                },
+                            ))
                             .child(detail_line("Source", &d.host()))
                             .child(detail_line(
                                 "Completed at",
