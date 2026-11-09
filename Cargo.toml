@@ -1,6 +1,6 @@
 [package]
 name = "strata"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 description = "101 Downloader: a native parallel download manager built with GPUI"
 license = "MIT"
@@ -33,7 +33,8 @@ russh-sftp = "3"
 librqbit = { version = "9", optional = true, default-features = false, features = ["rust-tls"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Globalization", "Win32_System_Time", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Ole", "Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_Globalization", "Win32_System_Time", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Power", "Win32_System_Shutdown", "Win32_System_SystemServices", "Win32_Storage_FileSystem", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows-core = "0.61"
 windows-registry = "0.5"
 
 [build-dependencies]

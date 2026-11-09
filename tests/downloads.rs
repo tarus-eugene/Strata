@@ -367,6 +367,104 @@ fn downloads_eight_ranges_concurrently_and_assembles_exact_bytes() {
 }
 
 #[test]
+fn completion_actions_are_session_only_and_consumed_after_success() {
+    use strata::engine::CompletionAction;
+
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let history = root.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(&server.url("/retry-once"), root.path().into(), 1)
+        .unwrap();
+    manager
+        .set_completion_action(id, Some(CompletionAction::Open))
+        .unwrap();
+    manager.persist();
+    {
+        let restored = Manager::new(history).unwrap();
+        assert!(restored.snapshots()[0].completion_action.is_none());
+        assert!(restored.take_completion_actions().is_empty());
+    }
+    wait(&manager, id, |d| {
+        if d.status != Status::Complete {
+            return false;
+        }
+        let actions = manager.take_completion_actions();
+        if actions.is_empty() {
+            return false;
+        }
+        assert_eq!(actions, vec![(id, CompletionAction::Open)]);
+        true
+    });
+    assert!(manager.take_completion_actions().is_empty());
+    assert!(manager.snapshots()[0].completion_action.is_none());
+    assert!(
+        manager
+            .set_completion_action(id, Some(CompletionAction::Open))
+            .is_err()
+    );
+}
+
+#[test]
+fn completion_chime_is_requested_once_and_can_be_disabled() {
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let history = root.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(&server.url("/chime.txt"), root.path().into(), 1)
+        .unwrap();
+    wait(&manager, id, |d| {
+        d.status == Status::Complete && manager.take_completion_chime()
+    });
+    assert!(!manager.take_completion_chime());
+
+    manager.settings.lock().unwrap().completion_chime = false;
+    let id = manager
+        .add(&server.url("/muted.txt"), root.path().into(), 1)
+        .unwrap();
+    wait(&manager, id, |d| d.status == Status::Complete);
+    manager.shutdown();
+    assert!(!manager.take_completion_chime());
+
+    let restored = Manager::new(history).unwrap();
+    assert!(!restored.settings.lock().unwrap().completion_chime);
+    assert!(!restored.take_completion_chime());
+}
+
+#[test]
+fn dragged_download_keeps_its_new_location_and_integrity_after_restart() {
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let history = root.path().join("history.json");
+    let manager = Manager::new(history.clone()).unwrap();
+    let id = manager
+        .add(&server.url("/move.txt"), root.path().into(), 1)
+        .unwrap();
+    let complete = wait(&manager, id, |d| d.status == Status::Complete);
+    manager.shutdown();
+    let manager = Manager::new(history.clone()).unwrap();
+    let original = complete.path();
+    let folder = root.path().join("moved");
+    std::fs::create_dir(&folder).unwrap();
+    let destination = folder.join("Renamed.txt");
+    manager
+        .drag_completed_download(id, &original, |path| {
+            std::fs::rename(path, &destination)?;
+            Ok(Some(destination.clone()))
+        })
+        .unwrap();
+    let restored = Manager::new(history).unwrap();
+    let current = restored.snapshots().pop().unwrap();
+    assert_eq!(current.status, Status::Complete);
+    assert_eq!(current.path(), destination);
+    assert_eq!(current.completed_at, complete.completed_at);
+    assert_eq!(current.integrity[0].sha256, complete.integrity[0].sha256);
+    assert!(!original.exists());
+}
+
+#[test]
 fn completed_downloads_detect_corruption_and_missing_files_across_restart() {
     let server = Server::new();
     let directory = tempfile::tempdir().unwrap();

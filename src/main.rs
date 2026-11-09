@@ -1,7 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod brand;
+mod completion;
 mod datetime;
+mod file_drag;
 mod input;
 mod scroll;
 mod speed;

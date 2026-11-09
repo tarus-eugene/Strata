@@ -273,6 +273,7 @@ impl Manager {
                         connections: parent.connections,
                         created: parent.created,
                         completed_at: None,
+                        completion_action: None,
                         referrer: None,
                         protocol: source.protocol,
                         options: source.options.clone(),

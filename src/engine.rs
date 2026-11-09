@@ -124,6 +124,25 @@ pub enum DownloadChange {
     SpeedLimit(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionAction {
+    ShutDown,
+    Sleep,
+    Restart,
+    Open,
+}
+
+impl CompletionAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ShutDown => "Shut down PC",
+            Self::Sleep => "Sleep",
+            Self::Restart => "Restart PC",
+            Self::Open => "Open",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Part {
     pub start: u64,
@@ -166,6 +185,8 @@ pub struct Download {
     pub created: u64,
     #[serde(default)]
     pub completed_at: Option<u64>,
+    #[serde(skip)]
+    pub completion_action: Option<CompletionAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
     #[serde(default)]
@@ -191,6 +212,14 @@ pub struct Download {
 }
 
 impl Download {
+    pub fn can_set_completion_action(&self) -> bool {
+        !self.owns_output
+            && !matches!(
+                self.status,
+                Status::Complete | Status::Missing | Status::Cancelled | Status::Deleting
+            )
+    }
+
     pub fn can_verify_integrity(&self) -> bool {
         self.owns_output
             && !self.status.active()
@@ -232,10 +261,16 @@ pub struct Settings {
     pub details_height: f32,
     #[serde(default)]
     pub speed_limit: u64,
+    #[serde(default = "default_completion_chime")]
+    pub completion_chime: bool,
 }
 
 fn default_details_height() -> f32 {
     240.
+}
+
+fn default_completion_chime() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -250,6 +285,7 @@ impl Default for Settings {
             transport: TransferOptions::default(),
             details_height: default_details_height(),
             speed_limit: 0,
+            completion_chime: default_completion_chime(),
         }
     }
 }
@@ -282,6 +318,8 @@ pub struct Manager {
     pub persistence_error: Mutex<Option<String>>,
     pub browser_error: Mutex<Option<String>>,
     pub show_requested: AtomicBool,
+    completion_pending: AtomicBool,
+    completion_actions: Mutex<Vec<(u64, CompletionAction)>>,
     global_limiter: Arc<controls::RateLimiter>,
     controls_lock: tokio::sync::Mutex<()>,
     global_editing: AtomicBool,
@@ -368,6 +406,8 @@ impl Manager {
             persistence_error: Mutex::new(None),
             browser_error: Mutex::new(None),
             show_requested: AtomicBool::new(false),
+            completion_pending: AtomicBool::new(false),
+            completion_actions: Mutex::new(Vec::new()),
             global_limiter,
             controls_lock: tokio::sync::Mutex::new(()),
             global_editing: AtomicBool::new(false),
@@ -402,6 +442,26 @@ impl Manager {
             .iter()
             .map(|j| j.data.lock().unwrap().clone())
             .collect()
+    }
+
+    pub fn take_completion_chime(&self) -> bool {
+        self.completion_pending.swap(false, Ordering::SeqCst)
+            && self.settings.lock().unwrap().completion_chime
+    }
+
+    pub fn set_completion_action(&self, id: u64, action: Option<CompletionAction>) -> Result<()> {
+        let job = self.find(id).context("This download no longer exists")?;
+        let mut data = job.data.lock().unwrap();
+        ensure!(
+            data.can_set_completion_action() && !self.quitting.load(Ordering::SeqCst),
+            "This download can no longer run a completion action"
+        );
+        data.completion_action = action;
+        Ok(())
+    }
+
+    pub fn take_completion_actions(&self) -> Vec<(u64, CompletionAction)> {
+        std::mem::take(&mut *self.completion_actions.lock().unwrap())
     }
 
     pub fn add(
@@ -552,6 +612,7 @@ impl Manager {
                 connections: connections.min(16),
                 created: id / 1_000_000,
                 completed_at: None,
+                completion_action: None,
                 referrer,
                 protocol: source.protocol,
                 options: source.options,
@@ -752,6 +813,7 @@ impl Manager {
             }
             job.control.store(CANCEL, Ordering::SeqCst);
             d.status = Status::Cancelled;
+            d.completion_action = None;
             // Partial files are retained; cancellation never deletes user data.
         }
         self.persist();
@@ -827,7 +889,7 @@ impl Manager {
         let manager = self.clone();
         self.runtime.spawn(async move {
             let result = manager.execute_with_retries(&job).await;
-            {
+            let completion_action = {
                 let mut d = job.data.lock().unwrap();
                 if job.deleting.load(Ordering::SeqCst) {
                     d.status = Status::Deleting;
@@ -843,9 +905,21 @@ impl Manager {
                         }
                     }
                 }
+                if d.status == Status::Complete && manager.settings.lock().unwrap().completion_chime
+                {
+                    manager.completion_pending.store(true, Ordering::SeqCst);
+                }
                 job.running.store(false, Ordering::SeqCst);
-            }
+                if d.status == Status::Complete {
+                    d.completion_action.take().map(|action| (d.id, action))
+                } else {
+                    None
+                }
+            };
             manager.persist();
+            if let Some(action) = completion_action {
+                manager.completion_actions.lock().unwrap().push(action);
+            }
         });
     }
 
@@ -1514,6 +1588,7 @@ mod settings_tests {
         )
         .unwrap();
         assert_eq!(settings.details_height, 240.);
+        assert!(settings.completion_chime);
         settings.details_height = 416.;
         let saved = serde_json::to_vec(&settings).unwrap();
         assert_eq!(

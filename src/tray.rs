@@ -34,14 +34,18 @@ struct TrayState {
     taskbar_created: u32,
 }
 
+pub(crate) fn window_hwnd(window: &Window) -> Result<HWND> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|error| anyhow::anyhow!("Cannot access the app window: {error}"))?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        anyhow::bail!("Expected a Windows window");
+    };
+    Ok(HWND(handle.hwnd.get() as *mut _))
+}
+
 impl Tray {
     pub fn new(window: &Window) -> Result<Self> {
-        let handle = HasWindowHandle::window_handle(window)
-            .map_err(|error| anyhow::anyhow!("Cannot access the app window: {error}"))?;
-        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            anyhow::bail!("The system tray requires a Windows window");
-        };
-        Self::from_handle(HWND(handle.hwnd.get() as *mut _))
+        Self::from_handle(window_hwnd(window)?)
     }
 
     fn from_handle(main: HWND) -> Result<Self> {

@@ -1,8 +1,9 @@
+use crate::file_drag::{copy_download, move_download};
 use crate::input::TextInput;
 use crate::scroll::{BAR_WIDTH, ScrollState, scroll_area};
 use crate::speed::DownloadSpeed;
 use crate::torrent_tree::{self, TorrentNode};
-use crate::tray::Tray;
+use crate::tray::{Tray, window_hwnd};
 use gpui::{prelude::*, *};
 use std::{
     cell::Cell,
@@ -12,7 +13,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use strata::engine::{AUTO_CONNECTIONS, Download, DownloadChange, Manager, Priority, Status};
+use strata::engine::{
+    AUTO_CONNECTIONS, CompletionAction, Download, DownloadChange, Manager, Priority, Status,
+};
 
 const BG: u32 = 0x000000;
 const SURFACE: u32 = 0x191919;
@@ -24,6 +27,13 @@ const FAINT: u32 = 0xa7a7a7;
 const ACCENT: u32 = 0xe85002;
 const AMBER: u32 = 0xd9c3ab;
 const RED: u32 = 0xf5988f;
+const COMPLETION_CHOICES: [Option<CompletionAction>; 5] = [
+    None,
+    Some(CompletionAction::ShutDown),
+    Some(CompletionAction::Sleep),
+    Some(CompletionAction::Restart),
+    Some(CompletionAction::Open),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -39,6 +49,7 @@ enum Menu {
     Filters,
     Download(u64),
     Priority(u64),
+    Completion(u64, Bounds<Pixels>),
 }
 
 #[derive(Clone)]
@@ -46,6 +57,7 @@ enum EditModal {
     Rename(u64),
     SpeedLimit(Vec<u64>),
     GlobalSpeedLimit,
+    OnComplete(u64),
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +74,8 @@ enum MenuAction {
     Options(u64),
     Rename(u64),
     SpeedLimit(u64),
+    OnComplete(u64),
+    SetCompletion(u64, Option<CompletionAction>),
     Priority(u64),
     SetPriority(u64, Priority),
 }
@@ -75,6 +89,7 @@ enum Icon {
     Play,
     Pause,
     Check,
+    Completion,
     Folder,
     File,
     Search,
@@ -106,6 +121,8 @@ pub struct Strata {
     edit_input: Entity<TextInput>,
     edit_error: Option<String>,
     edit_saving: bool,
+    completion_running: bool,
+    completion_error: Option<String>,
     torrent_picker: Option<u64>,
     torrent_checked: BTreeSet<usize>,
     torrent_focus: Vec<FocusHandle>,
@@ -123,6 +140,8 @@ pub struct Strata {
     error: Option<String>,
     focus: FocusHandle,
     compact: bool,
+    outbound_file_drag: bool,
+    middle_drag: Option<(u64, Point<Pixels>)>,
     menu: Option<(Menu, Point<Pixels>)>,
     menu_index: usize,
     menu_focus: FocusHandle,
@@ -217,6 +236,9 @@ impl Strata {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let outbound_file_drag = disable_inbound_file_drop(window)
+            .inspect_err(|error| eprintln!("Could not enable file dragging: {error:#}"))
+            .is_ok();
         let settings = manager.settings.lock().unwrap().clone();
         let url =
             cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", window, cx));
@@ -301,7 +323,15 @@ impl Strata {
                                 window.activate_window();
                             }
                         }
+                        if this.manager.take_completion_chime() {
+                            use windows::Win32::{
+                                System::Diagnostics::Debug::MessageBeep,
+                                UI::WindowsAndMessaging::MB_ICONINFORMATION,
+                            };
+                            let _ = unsafe { MessageBeep(MB_ICONINFORMATION) };
+                        }
                         this.refresh();
+                        this.run_completion_actions(window, cx);
                         this.show_pending_torrent(window, cx);
                         if this.view != View::Settings
                             && !this.tray.as_ref().is_some_and(|tray| tray.is_hidden())
@@ -332,6 +362,8 @@ impl Strata {
             edit_input,
             edit_error: None,
             edit_saving: false,
+            completion_running: false,
+            completion_error: None,
             torrent_picker: None,
             torrent_checked: BTreeSet::new(),
             torrent_focus: Vec::new(),
@@ -349,6 +381,8 @@ impl Strata {
             error: None,
             focus,
             compact: false,
+            outbound_file_drag,
+            middle_drag: None,
             menu: None,
             menu_index: 0,
             menu_focus: cx.focus_handle(),
@@ -405,6 +439,51 @@ impl Strata {
                 d.status == Status::Downloading,
             );
         }
+    }
+
+    fn run_completion_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_running {
+            return;
+        }
+        let actions = self
+            .manager
+            .take_completion_actions()
+            .into_iter()
+            .filter_map(|(id, action)| {
+                let download = self
+                    .downloads
+                    .iter()
+                    .find(|d| d.id == id && d.status == Status::Complete)?;
+                Some((action, download.path()))
+            })
+            .collect::<Vec<_>>();
+        if actions.is_empty() {
+            return;
+        }
+        self.completion_running = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let errors =
+                cx.background_executor()
+                    .spawn(async move {
+                        let mut errors = Vec::new();
+                        for (action, path) in actions {
+                            match crate::completion::run(action, &path) {
+                                Ok(()) if action != CompletionAction::Open => break,
+                                Ok(()) => {}
+                                Err(error) => errors
+                                    .push(format!("Could not run {}. {error:#}", action.label())),
+                            }
+                        }
+                        errors
+                    })
+                    .await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.completion_running = false;
+                this.completion_error = (!errors.is_empty()).then(|| errors.join("\n"));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -693,7 +772,12 @@ impl Strata {
             return vec![];
         };
         if self.checked.len() == 1 {
-            return self.menu_items(Menu::Download(id));
+            return self
+                .menu_items(Menu::Download(id))
+                .into_iter()
+                .filter(|(_, _, action)| !matches!(action, MenuAction::OnComplete(_)))
+                .filter_map(|(text, glyph, action)| Some((text, glyph?, action)))
+                .collect();
         }
         let selected = self
             .downloads
@@ -869,15 +953,15 @@ impl Strata {
     }
 
     fn open_edit(&mut self, modal: EditModal, window: &mut Window, cx: &mut Context<Self>) {
-        let (value, end) = match &modal {
+        let input = match &modal {
             EditModal::Rename(id) => {
                 let Some(download) = self.downloads.iter().find(|d| d.id == *id) else {
                     return;
                 };
-                (
+                Some((
                     download.name.clone(),
                     filename_selection_end(&download.name, download.protocol.folder_output()),
-                )
+                ))
             }
             EditModal::SpeedLimit(ids) => {
                 let Some(download) = self.downloads.iter().find(|d| ids.first() == Some(&d.id))
@@ -886,23 +970,28 @@ impl Strata {
                 };
                 let value = (download.speed_limit / 1024).to_string();
                 let end = value.len();
-                (value, end)
+                Some((value, end))
             }
             EditModal::GlobalSpeedLimit => {
                 let value = (self.manager.settings.lock().unwrap().speed_limit / 1024).to_string();
                 let end = value.len();
-                (value, end)
+                Some((value, end))
             }
+            EditModal::OnComplete(..) => None,
         };
-        self.edit_input.update(cx, |input, cx| {
-            input.set_value(&value, cx);
-            input.select_prefix(end, cx);
-        });
         self.adding = false;
         self.menu = None;
         self.edit_error = None;
         self.edit = Some(modal);
-        self.edit_input.focus_handle(cx).focus(window);
+        if let Some((value, end)) = input {
+            self.edit_input.update(cx, |input, cx| {
+                input.set_value(&value, cx);
+                input.select_prefix(end, cx);
+            });
+            self.edit_input.focus_handle(cx).focus(window);
+        } else {
+            self.modal_choose_focus.focus(window);
+        }
         cx.notify();
     }
 
@@ -910,6 +999,7 @@ impl Strata {
         if !self.edit_saving {
             self.edit = None;
             self.edit_error = None;
+            self.menu = None;
             self.focus.focus(window);
             cx.notify();
         }
@@ -959,6 +1049,7 @@ impl Strata {
                 };
                 vec![(0, self.manager.set_global_speed_limit(limit))]
             }
+            EditModal::OnComplete(_) => return,
         };
         self.edit_saving = true;
         self.edit_error = None;
@@ -995,16 +1086,56 @@ impl Strata {
         cx.notify();
     }
 
-    fn edit_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn edit_form(&self, cx: &mut Context<Self>) -> Div {
+        if let Some(EditModal::OnComplete(id)) = self.edit {
+            let selected = self
+                .downloads
+                .iter()
+                .find(|d| d.id == id)
+                .and_then(|d| d.completion_action);
+            let bounds = Rc::new(Cell::new(Bounds::default()));
+            let measured = bounds.clone();
+            return div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(16.))
+                .child(div().flex().items_center().justify_between()
+                    .child(label("On download complete", 18., TEXT).font_weight(FontWeight::MEDIUM))
+                    .child(icon_button("close-edit", Icon::Close).track_focus(&self.modal_close_focus)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_edit(window, cx)))))
+                .child(label("This action runs once when this download finishes during this session.", 13., MUTED))
+                .child(div().w(px(232.)).on_children_prepainted(move |children, _, _| measured.set(children[0]))
+                    .child(div().id("completion-action-select").h(px(36.)).w_full().px(px(10.))
+                        .flex().items_center().justify_between().cursor_pointer().bg(rgb(RAISED))
+                        .border_1().border_color(rgb(RULE)).focusable()
+                        .track_focus(&self.modal_choose_focus).focus(|style| style.border_color(rgb(ACCENT)))
+                        .hover(|style| style.bg(rgb(0x33363a)))
+                        .child(label(selected.map_or("Do nothing", CompletionAction::label), 13., TEXT))
+                        .child(icon(Icon::ChevronDown, 15., MUTED))
+                        .on_click(cx.listener({
+                            let bounds = bounds.clone();
+                            move |this, _, window, cx| {
+                                if matches!(this.menu, Some((Menu::Completion(..), _))) {
+                                    this.dismiss_menu(window);
+                                    cx.notify();
+                                } else {
+                                    this.open_completion_menu(id, selected, bounds.get(), window, cx);
+                                }
+                            }
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "up" | "down") {
+                                this.open_completion_menu(id, selected, bounds.get(), window, cx);
+                                cx.stop_propagation();
+                            }
+                        }))))
+                .child(label("Power actions affect the whole PC. Open launches an EXE or COM program, or opens the download folder.", 12., MUTED))
+                .children(self.edit_error.as_ref().map(|error| label(error, 12., RED)));
+        }
         let rename = matches!(self.edit, Some(EditModal::Rename(_)));
         let global = matches!(self.edit, Some(EditModal::GlobalSpeedLimit));
         let count = match &self.edit {
             Some(EditModal::SpeedLimit(ids)) => ids.len(),
             _ => 1,
         };
-        deferred(div().absolute().inset_0().occlude().bg(rgba(0x000000a6)).flex().items_center().justify_center()
-            .child(scroll_area("edit-download-modal", &self.edit_scroll,
-                div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(16.))
+        div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(16.))
                 .child(div().flex().items_center().justify_between()
                     .child(label(if rename { "Rename download" } else if global { "Global speed limit" } else { "Speed limit" }, 18., TEXT).font_weight(FontWeight::MEDIUM))
                     .child(icon_button("close-edit", Icon::Close).track_focus(&self.modal_close_focus)
@@ -1019,10 +1150,41 @@ impl Strata {
                         .on_click(cx.listener(|this, _, window, cx| this.close_edit(window, cx))))
                     .child(button("save-edit", if self.edit_saving { "Saving..." } else if rename { "Rename" } else { "Apply limit" }, Icon::Check, true)
                         .track_focus(&self.modal_start_focus).when(self.edit_saving, |button| button.opacity(0.6))
-                        .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))))), window, cx.entity_id())
-                .w(px(560.)).max_w(relative(0.9)).max_h(relative(0.85)).bg(rgb(SURFACE)).border_1().border_color(rgb(0x44484c))
-                .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_edit(window, cx))))
-        ).with_priority(2)
+                        .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx)))))
+    }
+
+    fn edit_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        deferred(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(rgba(0x000000a6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    scroll_area(
+                        "edit-download-modal",
+                        &self.edit_scroll,
+                        self.edit_form(cx),
+                        window,
+                        cx.entity_id(),
+                    )
+                    .w(px(560.))
+                    .max_w(relative(0.9))
+                    .max_h(relative(0.85))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(0x44484c))
+                    .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                        if !matches!(this.menu, Some((Menu::Completion(..), _))) {
+                            this.close_edit(window, cx);
+                        }
+                    })),
+                ),
+        )
+        .with_priority(2)
     }
 
     fn show_menu(
@@ -1045,8 +1207,36 @@ impl Strata {
         cx.notify();
     }
 
-    fn menu_items(&self, menu: Menu) -> Vec<(&'static str, Icon, MenuAction)> {
-        match menu {
+    fn open_completion_menu(
+        &mut self,
+        id: u64,
+        selected: Option<CompletionAction>,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_menu(
+            Menu::Completion(id, bounds),
+            bounds.bottom_left(),
+            window,
+            cx,
+        );
+        self.menu_index = COMPLETION_CHOICES
+            .iter()
+            .position(|choice| *choice == selected)
+            .unwrap_or(0);
+    }
+
+    fn dismiss_menu(&mut self, window: &mut Window) {
+        if matches!(self.menu.take(), Some((Menu::Completion(..), _))) {
+            self.modal_choose_focus.focus(window);
+        } else {
+            self.focus.focus(window);
+        }
+    }
+
+    fn menu_items(&self, menu: Menu) -> Vec<(&'static str, Option<Icon>, MenuAction)> {
+        let items = match menu {
             Menu::Filters => vec![
                 (
                     "All downloads",
@@ -1074,6 +1264,18 @@ impl Strata {
                     MenuAction::SetPriority(id, Priority::Low),
                 ),
             ],
+            Menu::Completion(id, _) => {
+                return COMPLETION_CHOICES
+                    .into_iter()
+                    .map(|action| {
+                        (
+                            action.map_or("Do nothing", CompletionAction::label),
+                            None,
+                            MenuAction::SetCompletion(id, action),
+                        )
+                    })
+                    .collect();
+            }
             Menu::Download(id) => {
                 let Some(d) = self.downloads.iter().find(|d| d.id == id) else {
                     return vec![];
@@ -1105,6 +1307,13 @@ impl Strata {
                     items.push(("Speed limit", Icon::Settings, MenuAction::SpeedLimit(id)));
                     items.push(("Set priority", Icon::Flag, MenuAction::Priority(id)));
                 }
+                if d.can_set_completion_action() {
+                    items.push((
+                        "On download complete",
+                        Icon::Completion,
+                        MenuAction::OnComplete(id),
+                    ));
+                }
                 if !matches!(
                     d.status,
                     Status::Complete
@@ -1122,7 +1331,11 @@ impl Strata {
                 }
                 items
             }
-        }
+        };
+        items
+            .into_iter()
+            .map(|(text, glyph, action)| (text, Some(glyph), action))
+            .collect()
     }
 
     fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -1171,6 +1384,26 @@ impl Strata {
                 self.open_edit(EditModal::SpeedLimit(self.action_ids(id)), window, cx);
                 return;
             }
+            MenuAction::OnComplete(id) => {
+                self.open_edit(EditModal::OnComplete(id), window, cx);
+                return;
+            }
+            MenuAction::SetCompletion(id, action) => {
+                self.dismiss_menu(window);
+                if matches!(self.edit, Some(EditModal::OnComplete(current)) if current == id) {
+                    match self.manager.set_completion_action(id, action) {
+                        Ok(()) => {
+                            self.refresh();
+                            self.close_edit(window, cx);
+                        }
+                        Err(error) => {
+                            self.edit_error = Some(error.to_string());
+                            cx.notify();
+                        }
+                    }
+                }
+                return;
+            }
             MenuAction::Priority(id) => {
                 let position = self.menu.map(|(_, position)| position).unwrap_or_default();
                 self.show_menu(Menu::Priority(id), position, window, cx);
@@ -1202,10 +1435,11 @@ impl Strata {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let items = self.menu_items(menu);
+        let completion = matches!(menu, Menu::Completion(..));
         deferred(
             anchored()
                 .position(position)
-                .anchor(Corner::TopRight)
+                .anchor(if completion { Corner::TopLeft } else { Corner::TopRight })
                 .snap_to_window_with_margin(px(8.))
                 .child(
                     div()
@@ -1219,9 +1453,11 @@ impl Strata {
                         .flex()
                         .flex_col()
                         .track_focus(&self.menu_focus)
-                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                            this.menu = None;
-                            this.focus.focus(window);
+                        .on_mouse_down_out(cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            if matches!(menu, Menu::Completion(_, bounds) if bounds.contains(&event.position)) {
+                                return;
+                            }
+                            this.dismiss_menu(window);
                             cx.notify();
                         }))
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1244,9 +1480,10 @@ impl Strata {
                                         this.run_menu_action(*action, window, cx);
                                     }
                                 }
-                                "escape" => {
-                                    this.menu = None;
-                                    this.focus.focus(window);
+                                "escape" => this.dismiss_menu(window),
+                                "tab" if matches!(menu, Menu::Completion(..)) => {
+                                    this.dismiss_menu(window);
+                                    this.modal_close_focus.focus(window);
                                 }
                                 _ => return,
                             }
@@ -1256,7 +1493,8 @@ impl Strata {
                         .children(items.into_iter().enumerate().map(
                             |(i, (text, glyph, action))| {
                                 let chosen = matches!(action, MenuAction::Filter(view) if self.view == view)
-                                    || matches!(action, MenuAction::SetPriority(id, priority) if self.action_ids(id).iter().all(|id| self.downloads.iter().any(|d| d.id == *id && d.priority == priority)));
+                                    || matches!(action, MenuAction::SetPriority(id, priority) if self.action_ids(id).iter().all(|id| self.downloads.iter().any(|d| d.id == *id && d.priority == priority)))
+                                    || matches!(action, MenuAction::SetCompletion(id, choice) if self.downloads.iter().any(|d| d.id == id && d.completion_action == choice));
                                 div()
                                     .id(ElementId::Name(format!("menu-item-{i}").into()))
                                     .h(px(36.))
@@ -1272,7 +1510,7 @@ impl Strata {
                                             cx.notify();
                                         }
                                     }))
-                                    .child(icon(
+                                    .children(glyph.map(|glyph| icon(
                                         glyph,
                                         15.,
                                         if matches!(action, MenuAction::Delete(_)) {
@@ -1280,9 +1518,11 @@ impl Strata {
                                         } else {
                                             MUTED
                                         },
-                                    ))
-                                    .child(label(text, 13., TEXT).flex_1())
-                                    .when(chosen, |d| d.child(icon(Icon::Check, 14., ACCENT)))
+                                    )))
+                                    .child(label(text, 13., if completion && chosen { AMBER } else { TEXT })
+                                        .flex_1()
+                                        .when(completion && chosen, |text| text.font_weight(FontWeight::SEMIBOLD)))
+                                    .when(chosen && !completion, |d| d.child(icon(Icon::Check, 14., ACCENT)))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.run_menu_action(action, window, cx);
@@ -1290,7 +1530,7 @@ impl Strata {
                             },
                         )),
                 ),
-        )
+        ).with_priority(if completion { 3 } else { 0 })
     }
 
     fn finish_resize(&mut self) {
@@ -1480,6 +1720,7 @@ impl Strata {
         let selected = self.checked.contains(&id);
         let rate = self.rates.get(&id).map_or(0., DownloadSpeed::rate);
         let color = status_color(d.status);
+        let can_drag = self.outbound_file_drag && d.status == Status::Complete;
         let truncated = Rc::new(Cell::new(false));
         let filename: SharedString = d.name.clone().into();
         table_row()
@@ -1497,12 +1738,22 @@ impl Strata {
                         .into()
                 }
             })
-            .when(d.status == Status::Complete, |row| {
-                row.on_drag(d.path(), |path, _, window, cx| {
+            .when(can_drag, |row| {
+                let manager = self.manager.clone();
+                row.on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                        this.middle_drag = Some((id, event.position));
+                    }),
+                )
+                .on_drag(d.path(), move |path, _, window, cx| {
                     let path = path.clone();
+                    let manager = manager.clone();
                     window
                         .spawn(cx, async move |cx| {
-                            if let Err(error) = drag_download(&path) {
+                            if let Err(error) =
+                                manager.drag_completed_download(id, &path, move_download)
+                            {
                                 eprintln!("Could not drag download: {error:#}");
                             }
                             // The shell consumes the mouse-up that normally ends a GPUI drag.
@@ -1661,6 +1912,37 @@ impl Strata {
                     reveal(&download.path());
                 }
             }))
+    }
+
+    fn copy_on_middle_drag(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Middle) {
+            self.middle_drag = None;
+            return;
+        }
+        let Some((id, start)) = self.middle_drag else {
+            return;
+        };
+        if (event.position - start).magnitude() <= 2. {
+            return;
+        }
+        self.middle_drag = None;
+        let Some(download) = self.downloads.iter().find(|download| download.id == id) else {
+            return;
+        };
+        let path = download.path();
+        let manager = self.manager.clone();
+        window
+            .spawn(cx, async move |_| {
+                if let Err(error) = manager.drag_completed_download(id, &path, copy_download) {
+                    eprintln!("Could not drag a copy: {error:#}");
+                }
+            })
+            .detach();
     }
 
     fn torrent_modal(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2232,8 +2514,21 @@ impl Strata {
     }
 
     fn settings(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let completion_chime = self.manager.settings.lock().unwrap().completion_chime;
         let content = div().p(px(32.)).flex().flex_col().gap(px(24.))
             .child(label("Settings", 24., TEXT).font_weight(FontWeight::SEMIBOLD))
+            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+                .child(label("Completion chime", 15., TEXT).font_weight(FontWeight::MEDIUM))
+                .child(label("Play a sound when a download finishes.", 13., MUTED))
+                .child(button("completion-chime", if completion_chime { "Turn off chime" } else { "Turn on chime" }, Icon::Settings, false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        {
+                            let mut settings = this.manager.settings.lock().unwrap();
+                            settings.completion_chime = !settings.completion_chime;
+                        }
+                        this.manager.persist();
+                        cx.notify();
+                    }))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Global speed limit", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label({ let limit = self.manager.settings.lock().unwrap().speed_limit; if limit == 0 { "Unlimited".into() } else { format!("{}/s shared across all downloads", bytes(limit)) } }, 13., MUTED))
@@ -2325,7 +2620,14 @@ impl Render for Strata {
             .flex_col()
             .overflow_hidden()
             .when(self.resizing.is_some(), |d| d.cursor_ns_resize())
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.middle_drag = None))
+            .capture_any_mouse_up(cx.listener(|this, _, _, _| this.middle_drag = None))
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|this, _, _, _| this.middle_drag = None),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.copy_on_middle_drag(event, window, cx);
                 if let Some((start_y, start_height)) = this.resizing {
                     if event.dragging() {
                         let delta: f32 = (start_y - event.position.y).into();
@@ -2456,12 +2758,19 @@ impl Render for Strata {
                             }
                         }
                         "tab" => {
-                            let handles = [
-                                this.edit_input.focus_handle(cx),
-                                this.modal_choose_focus.clone(),
-                                this.modal_start_focus.clone(),
-                                this.modal_close_focus.clone(),
-                            ];
+                            let handles = if matches!(this.edit, Some(EditModal::OnComplete(_))) {
+                                vec![
+                                    this.modal_choose_focus.clone(),
+                                    this.modal_close_focus.clone(),
+                                ]
+                            } else {
+                                vec![
+                                    this.edit_input.focus_handle(cx),
+                                    this.modal_choose_focus.clone(),
+                                    this.modal_start_focus.clone(),
+                                    this.modal_close_focus.clone(),
+                                ]
+                            };
                             let index = handles
                                 .iter()
                                 .position(|handle| handle.is_focused(window))
@@ -2620,6 +2929,11 @@ impl Render for Strata {
             )
             .child(self.footer(cx))
             .children(
+                self.completion_error
+                    .as_ref()
+                    .map(|error| label(error, 12., RED).px(px(28.)).py(px(8.))),
+            )
+            .children(
                 self.menu
                     .map(|(menu, position)| self.popup_menu(menu, position, cx)),
             )
@@ -2637,29 +2951,14 @@ impl Render for FileDragPreview {
     }
 }
 
-fn drag_download(path: &std::path::Path) -> anyhow::Result<()> {
-    use windows::{
-        Win32::{
-            System::{Com::IDataObject, Ole::DROPEFFECT_COPY},
-            UI::{
-                Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, VK_LBUTTON},
-                Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop},
-            },
-        },
-        core::HSTRING,
-    };
+fn disable_inbound_file_drop(window: &Window) -> anyhow::Result<()> {
+    use windows::Win32::{Foundation::DRAGDROP_E_NOTREGISTERED, System::Ole::RevokeDragDrop};
 
-    // GPUI has initialized OLE on this UI thread. The shell supplies the drop source and drag image.
-    unsafe {
-        if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 {
-            let item: IShellItem =
-                SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)?;
-            let data: IDataObject = item.BindToHandler(None, &BHID_DataObject)?;
-            ReleaseCapture()?;
-            SHDoDragDrop(None, &data, None, DROPEFFECT_COPY)?;
-        }
+    // shortcut: GPUI 0.2.2 dereferences the CF_HDROP handle. Restore the target when incoming drops are supported and GPUI fixes this.
+    match unsafe { RevokeDragDrop(window_hwnd(window)?) } {
+        Err(error) if error.code() == DRAGDROP_E_NOTREGISTERED => Ok(()),
+        result => result.map_err(Into::into),
     }
-    Ok(())
 }
 
 struct ActionTooltip(SharedString, Option<Rc<Cell<bool>>>);
@@ -3067,6 +3366,24 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
                 Icon::Play => vec![vec![(8., 4.), (20., 12.), (8., 20.), (8., 4.)]],
                 Icon::Pause => vec![vec![(8., 5.), (8., 19.)], vec![(16., 5.), (16., 19.)]],
                 Icon::Check => vec![vec![(4., 12.), (9., 17.), (20., 6.)]],
+                Icon::Completion => vec![
+                    vec![
+                        (12., 2.5),
+                        (17., 4.),
+                        (20., 7.),
+                        (21.5, 12.),
+                        (20., 17.),
+                        (17., 20.),
+                        (12., 21.5),
+                        (7., 20.),
+                        (4., 17.),
+                        (2.5, 12.),
+                        (4., 7.),
+                        (7., 4.),
+                        (12., 2.5),
+                    ],
+                    vec![(7.5, 12.), (10.5, 15.), (16.5, 9.)],
+                ],
                 Icon::Folder => vec![vec![
                     (3., 6.),
                     (9., 6.),
@@ -3197,6 +3514,36 @@ fn icon(glyph: Icon, dimension: f32, color: u32) -> impl IntoElement {
 mod tests {
     use super::{filename_selection_end, parse_speed_limit, select_download};
     use std::collections::BTreeSet;
+
+    #[test]
+    #[ignore = "requires a Windows desktop and DirectX"]
+    fn main_window_is_not_a_native_file_drop_target() {
+        use super::{Strata, window_hwnd};
+        use gpui::{AppContext, Application, WindowOptions};
+        use strata::engine::Manager;
+        use windows::Win32::{Foundation::DRAGDROP_E_NOTREGISTERED, System::Ole::RevokeDragDrop};
+
+        let data = tempfile::tempdir().unwrap();
+        let manager = Manager::new(data.path().join("history.json")).unwrap();
+        Application::new().run(move |cx| {
+            cx.open_window(
+                WindowOptions {
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let app = cx.new(|cx| Strata::new(manager, None, None, window, cx));
+                    assert!(app.read(cx).outbound_file_drag);
+                    let error =
+                        unsafe { RevokeDragDrop(window_hwnd(window).unwrap()) }.unwrap_err();
+                    assert_eq!(error.code(), DRAGDROP_E_NOTREGISTERED);
+                    app
+                },
+            )
+            .unwrap();
+            cx.quit();
+        });
+    }
 
     #[test]
     fn selection_supports_toggle_ranges_and_display_order() {

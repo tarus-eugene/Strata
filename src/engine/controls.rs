@@ -172,6 +172,82 @@ impl Manager {
         self.persist();
     }
 
+    pub fn drag_completed_download(
+        &self,
+        id: u64,
+        original: &Path,
+        drag: impl FnOnce(&Path) -> Result<Option<PathBuf>>,
+    ) -> Result<()> {
+        let _guard = self
+            .controls_lock
+            .try_lock()
+            .context("Another download is being edited")?;
+        let job = self.find(id).context("This download no longer exists")?;
+        {
+            let data = job.data.lock().unwrap();
+            ensure!(
+                data.status == Status::Complete
+                    && data.owns_output
+                    && data.path() == original
+                    && !job.running.load(Ordering::SeqCst)
+                    && !job.deleting.load(Ordering::SeqCst)
+                    && !self.quitting.load(Ordering::SeqCst),
+                "This download is no longer available to move"
+            );
+            ensure!(
+                !job.editing.swap(true, Ordering::SeqCst),
+                "This download is busy"
+            );
+        }
+        let result = (|| {
+            let Some(destination) = drag(original)? else {
+                return Ok(());
+            };
+            let directory = destination
+                .parent()
+                .filter(|path| path.is_absolute())
+                .context("The move did not return a filesystem folder")?;
+            let name = destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("The new filename is invalid")?;
+            validate_name(name)?;
+            let metadata = fs::symlink_metadata(&destination)?;
+            {
+                let jobs = self.jobs.lock().unwrap();
+                ensure!(
+                    !jobs
+                        .iter()
+                        .filter(|other| !Arc::ptr_eq(other, &job))
+                        .any(|other| {
+                            other
+                                .data
+                                .lock()
+                                .unwrap()
+                                .path()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case(&destination.to_string_lossy())
+                        }),
+                    "Another download already uses the new location"
+                );
+                let mut data = job.data.lock().unwrap();
+                ensure!(
+                    !metadata.file_type().is_symlink()
+                        && metadata.is_dir() == data.protocol.folder_output(),
+                    "The new location does not contain the expected file or folder"
+                );
+                data.directory = directory.to_owned();
+                data.name = name.to_owned();
+                data.preserve_name = true;
+            }
+            // The shell has already moved the file. Keep the new path if saving needs a retry.
+            self.persist();
+            Ok(())
+        })();
+        job.editing.store(false, Ordering::SeqCst);
+        result
+    }
+
     pub fn change_download(
         self: &Arc<Self>,
         id: u64,
