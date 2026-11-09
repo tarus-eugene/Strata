@@ -103,7 +103,27 @@ fn serve(
         }
     }
     let request = String::from_utf8_lossy(&request).to_lowercase();
-    requests.lock().unwrap().push(request.clone());
+    let retry_count = {
+        let mut requests = requests.lock().unwrap();
+        requests.push(request.clone());
+        requests.iter().filter(|prior| *prior == &request).count()
+    };
+    if request.contains("/retry-forever")
+        || (request.contains("/retry-once")
+            && request.contains("range: bytes=0-0")
+            && retry_count == 1)
+    {
+        stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        return Ok(());
+    }
+    if request.contains("/not-found") {
+        stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        return Ok(());
+    }
     if request.contains("/name-redirect/") {
         stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /Readable-report.pdf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return Ok(());
@@ -214,6 +234,51 @@ fn wait(
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn transient_probe_failure_retries_and_finishes_with_auto_connections() {
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let manager = Manager::new(root.path().join("history.json")).unwrap();
+    let id = manager
+        .add(
+            &server.url("/retry-once"),
+            root.path().into(),
+            strata::engine::AUTO_CONNECTIONS,
+        )
+        .unwrap();
+
+    wait(&manager, id, |d| d.status == Status::Retrying);
+    let result = wait(&manager, id, |d| {
+        matches!(d.status, Status::Complete | Status::Failed)
+    });
+    assert_eq!(result.status, Status::Complete, "{:?}", result.error);
+    assert_eq!(result.parts.len(), 1);
+    assert_eq!(std::fs::read(result.path()).unwrap(), *server.bytes);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn retry_wait_can_be_paused_and_missing_files_fail_immediately() {
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let manager = Manager::new(root.path().join("history.json")).unwrap();
+    let id = manager
+        .add(&server.url("/retry-forever"), root.path().into(), 1)
+        .unwrap();
+    wait(&manager, id, |d| d.status == Status::Retrying);
+    manager.pause(id);
+    wait(&manager, id, |d| d.status == Status::Paused);
+
+    let id = manager
+        .add(&server.url("/not-found"), root.path().into(), 1)
+        .unwrap();
+    let result = wait(&manager, id, |d| {
+        matches!(d.status, Status::Failed | Status::Retrying)
+    });
+    assert_eq!(result.status, Status::Failed);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 
 #[test]

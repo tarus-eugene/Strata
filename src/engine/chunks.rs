@@ -8,6 +8,16 @@ use tokio::sync::Notify;
 const TARGET_CHUNK: u64 = 4 * 1024 * 1024;
 const MAX_CHUNKS: usize = 8192;
 
+pub(super) fn connections(ranged_size: Option<u64>, requested: usize) -> usize {
+    ranged_size.map_or(1, |size| {
+        if requested == AUTO_CONNECTIONS {
+            size.div_ceil(TARGET_CHUNK).clamp(1, 16) as usize
+        } else {
+            requested.clamp(1, 16)
+        }
+    })
+}
+
 pub(super) enum Outcome {
     Complete,
     Split,
@@ -185,7 +195,9 @@ pub(super) async fn download(job: Arc<Job>, client: Client) -> Result<()> {
         }
         (
             data.parts.len(),
-            data.connections.clamp(1, 16).min(data.parts.len()).max(1),
+            connections(data.total.filter(|_| data.ranged), data.connections)
+                .min(data.parts.len())
+                .max(1),
         )
     };
     let queue = Arc::new(Queue {
@@ -233,6 +245,17 @@ pub(super) async fn download(job: Arc<Job>, client: Client) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{ordered_indices, plan};
+
+    #[test]
+    fn automatic_connections_scale_with_validated_range_size() {
+        use super::{AUTO_CONNECTIONS, TARGET_CHUNK, connections};
+        assert_eq!(connections(None, AUTO_CONNECTIONS), 1);
+        assert_eq!(connections(None, 8), 1);
+        assert_eq!(connections(Some(TARGET_CHUNK), AUTO_CONNECTIONS), 1);
+        assert_eq!(connections(Some(TARGET_CHUNK + 1), AUTO_CONNECTIONS), 2);
+        assert_eq!(connections(Some(100 * TARGET_CHUNK), AUTO_CONNECTIONS), 16);
+        assert_eq!(connections(Some(100 * TARGET_CHUNK), 4), 4);
+    }
 
     #[test]
     fn queued_chunks_cover_the_file_and_remain_valid_when_appended_out_of_order() {

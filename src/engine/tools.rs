@@ -113,6 +113,25 @@ pub(super) fn executable(name: &str) -> Result<PathBuf> {
     )
 }
 
+#[derive(Debug)]
+pub(super) struct ToolExit {
+    pub(super) code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for ToolExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Transfer tool failed ({}): {}",
+            self.code,
+            self.message.trim()
+        )
+    }
+}
+
+impl std::error::Error for ToolExit {}
+
 pub(super) async fn run(
     job: &Arc<Job>,
     executable: &Path,
@@ -154,12 +173,11 @@ pub(super) async fn run(
                 {
                     secret.redact(&mut message)?;
                 }
-                message = message.chars().take(8192).collect();
-                bail!(
-                    "Transfer tool failed ({}): {}",
-                    status.code().unwrap_or(-1),
-                    message.trim()
-                );
+                return Err(ToolExit {
+                    code: status.code().unwrap_or(-1),
+                    message: message.chars().take(8192).collect(),
+                }
+                .into());
             }
             Ok(out)
         };
@@ -213,6 +231,7 @@ pub(super) fn begin_file(
     let old_len = fs::metadata(&path).map_or(0, |m| m.len());
     let reuse = total.is_some()
         && total == d.total
+        && validator.is_some()
         && validator == d.validator
         && old_len <= total.unwrap();
     if !reuse {

@@ -5,13 +5,14 @@ use crate::torrent_tree::{self, TorrentNode};
 use crate::tray::Tray;
 use gpui::{prelude::*, *};
 use std::{
+    cell::Cell,
     collections::{BTreeSet, HashMap},
     path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
-use strata::engine::{Download, DownloadChange, Manager, Priority, Status};
+use strata::engine::{AUTO_CONNECTIONS, Download, DownloadChange, Manager, Priority, Status};
 
 const BG: u32 = 0x000000;
 const SURFACE: u32 = 0x191919;
@@ -700,12 +701,7 @@ impl Strata {
             .filter(|d| self.checked.contains(&d.id))
             .collect::<Vec<_>>();
         let mut actions = Vec::new();
-        if selected.iter().any(|d| {
-            matches!(
-                d.status,
-                Status::Queued | Status::Connecting | Status::Downloading
-            )
-        }) {
+        if selected.iter().any(|d| d.status.can_pause_transfer()) {
             actions.push(("Pause selected", Icon::Pause, MenuAction::Pause(id)));
         }
         if selected
@@ -773,7 +769,9 @@ impl Strata {
                     })
                     .children(actions.into_iter().map(|(text, glyph, action)| {
                         icon_button(format!("selection-action-{text}"), glyph)
-                            .tooltip(move |_, cx| cx.new(|_| ActionTooltip(text)).into())
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ActionTooltip(text.into(), None)).into()
+                            })
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 if let MenuAction::Priority(id) = action {
                                     this.show_menu(
@@ -1081,10 +1079,7 @@ impl Strata {
                     return vec![];
                 };
                 let mut items = Vec::new();
-                if matches!(
-                    d.status,
-                    Status::Queued | Status::Connecting | Status::Downloading
-                ) {
+                if d.status.can_pause_transfer() {
                     items.push(("Pause", Icon::Pause, MenuAction::Pause(id)));
                 } else if !d.owns_output && matches!(d.status, Status::Paused | Status::Failed) {
                     items.push(("Resume", Icon::Play, MenuAction::Resume(id)));
@@ -1092,6 +1087,7 @@ impl Strata {
                 if d.status == Status::Complete {
                     items.push(("Open", Icon::Arrow, MenuAction::Open(id)));
                 }
+                items.push(("Open folder", Icon::Folder, MenuAction::Folder(id)));
                 if d.can_verify_integrity() {
                     items.push(("Verify file integrity", Icon::Check, MenuAction::Verify(id)));
                 }
@@ -1103,7 +1099,6 @@ impl Strata {
                 {
                     items.push(("Options", Icon::Settings, MenuAction::Options(id)));
                 }
-                items.push(("Open folder", Icon::Folder, MenuAction::Folder(id)));
                 items.push(("Copy download link", Icon::Copy, MenuAction::Copy(id)));
                 if d.status != Status::Deleting {
                     items.push(("Rename", Icon::File, MenuAction::Rename(id)));
@@ -1485,6 +1480,8 @@ impl Strata {
         let selected = self.checked.contains(&id);
         let rate = self.rates.get(&id).map_or(0., DownloadSpeed::rate);
         let color = status_color(d.status);
+        let truncated = Rc::new(Cell::new(false));
+        let filename: SharedString = d.name.clone().into();
         table_row()
             .id(ElementId::Name(format!("download-{id}").into()))
             .h(px(48.))
@@ -1493,6 +1490,28 @@ impl Strata {
             .hover(|s| s.bg(rgb(SURFACE)))
             .focusable()
             .focus(|s| s.bg(rgb(RAISED)))
+            .tooltip({
+                let truncated = truncated.clone();
+                move |_, cx| {
+                    cx.new(|_| ActionTooltip(filename.clone(), Some(truncated.clone())))
+                        .into()
+                }
+            })
+            .when(d.status == Status::Complete, |row| {
+                row.on_drag(d.path(), |path, _, window, cx| {
+                    let path = path.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            if let Err(error) = drag_download(&path) {
+                                eprintln!("Could not drag download: {error:#}");
+                            }
+                            // The shell consumes the mouse-up that normally ends a GPUI drag.
+                            let _ = cx.update(|window, cx| cx.stop_active_drag(window));
+                        })
+                        .detach();
+                    cx.new(|_| FileDragPreview)
+                })
+            })
             .child(
                 checkbox(format!("check-{id}"), selected, false).on_click(cx.listener(
                     move |this, event: &ClickEvent, _, cx| {
@@ -1516,11 +1535,17 @@ impl Strata {
                             .flex_1()
                             .min_w_0()
                             .child(
-                                highlighted_label(d.name.clone(), 14., TEXT, &self.search_query)
-                                    .w_full()
-                                    .flex_shrink_0()
-                                    .min_w_0()
-                                    .truncate(),
+                                highlighted_label(
+                                    &d.name,
+                                    14.,
+                                    TEXT,
+                                    &self.search_query,
+                                    Some(truncated),
+                                )
+                                .w_full()
+                                .flex_shrink_0()
+                                .min_w_0()
+                                .truncate(),
                             )
                             .when(
                                 !self.search_query.is_empty()
@@ -1528,11 +1553,17 @@ impl Strata {
                                         .is_empty(),
                                 |column| {
                                     column.child(
-                                        highlighted_label(d.host(), 11., MUTED, &self.search_query)
-                                            .w_full()
-                                            .min_w_0()
-                                            .flex_shrink_0()
-                                            .truncate(),
+                                        highlighted_label(
+                                            d.host(),
+                                            11.,
+                                            MUTED,
+                                            &self.search_query,
+                                            None,
+                                        )
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex_shrink_0()
+                                        .truncate(),
                                     )
                                 },
                             ),
@@ -1955,10 +1986,14 @@ impl Strata {
                     ),
             )
             .child(label(
-                format!(
-                    "Up to {} connections · Enter to start · Esc to close",
-                    self.connections
-                ),
+                if self.connections == AUTO_CONNECTIONS {
+                    "Automatic connections · Enter to start · Esc to close".into()
+                } else {
+                    format!(
+                        "Up to {} connections · Enter to start · Esc to close",
+                        self.connections
+                    )
+                },
                 11.,
                 FAINT,
             ))
@@ -2058,7 +2093,7 @@ impl Strata {
                             .child(
                                 label(&d.name, 15., TEXT)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .truncate(),
+                                    .flex_shrink_0(),
                             )
                             .child(
                                 label(
@@ -2232,11 +2267,11 @@ impl Strata {
                 .child(button("choose-folder", "Choose folder", Icon::Folder, false).on_click(cx.listener(|this, _, window, cx| this.choose_directory(window, cx)))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
                 .child(label("Connections per download", 15., TEXT).font_weight(FontWeight::MEDIUM))
-                .child(label("More connections can help on some servers. 101 Downloader uses fewer for small files and servers that need a single connection.", 13., MUTED).max_w(px(620.)))
-                .child(div().flex().gap(px(10.)).children([1, 4, 8, 16].into_iter().map(|n| {
+                .child(label("Auto chooses up to 16 connections for HTTP downloads based on file size and server support. You can also set a limit yourself.", 13., MUTED).max_w(px(620.)))
+                .child(div().flex().gap(px(10.)).children([AUTO_CONNECTIONS, 1, 4, 8, 16].into_iter().map(|n| {
                     div().id(ElementId::Name(format!("connections-{n}").into())).w(px(64.)).h(px(36.)).flex().items_center().justify_center().cursor_pointer()
                         .bg(rgb(if self.connections == n { TEXT } else { RAISED })).text_color(rgb(if self.connections == n { BG } else { MUTED }))
-                        .focusable().focus(|s| s.border_1().border_color(rgb(ACCENT))).hover(|s| s.opacity(0.85)).child(n.to_string())
+                        .focusable().focus(|s| s.border_1().border_color(rgb(ACCENT))).hover(|s| s.opacity(0.85)).child(if n == AUTO_CONNECTIONS { "Auto".into() } else { n.to_string() })
                         .on_click(cx.listener(move |this, _, _, cx| this.set_connections(n, cx)))
                 }))))
             .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
@@ -2594,25 +2629,70 @@ impl Render for Strata {
     }
 }
 
-struct ActionTooltip(&'static str);
+struct FileDragPreview;
 
-impl Render for ActionTooltip {
+impl Render for FileDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .p(px(8.))
-            .bg(rgb(RAISED))
-            .border_1()
-            .border_color(rgb(MUTED))
-            .font_family("Segoe UI")
-            .child(label(self.0, 12., TEXT))
+    }
+}
+
+fn drag_download(path: &std::path::Path) -> anyhow::Result<()> {
+    use windows::{
+        Win32::{
+            System::{Com::IDataObject, Ole::DROPEFFECT_COPY},
+            UI::{
+                Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, VK_LBUTTON},
+                Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop},
+            },
+        },
+        core::HSTRING,
+    };
+
+    // GPUI has initialized OLE on this UI thread. The shell supplies the drop source and drag image.
+    unsafe {
+        if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 {
+            let item: IShellItem =
+                SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)?;
+            let data: IDataObject = item.BindToHandler(None, &BHID_DataObject)?;
+            ReleaseCapture()?;
+            SHDoDragDrop(None, &data, None, DROPEFFECT_COPY)?;
+        }
+    }
+    Ok(())
+}
+
+struct ActionTooltip(SharedString, Option<Rc<Cell<bool>>>);
+
+impl Render for ActionTooltip {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().when(
+            self.1.as_ref().is_none_or(|truncated| truncated.get()),
+            |tooltip| {
+                tooltip
+                    .p(px(8.))
+                    .max_w(window.viewport_size().width - px(32.))
+                    .bg(rgb(RAISED))
+                    .border_1()
+                    .border_color(rgb(MUTED))
+                    .font_family("Segoe UI")
+                    .child(label(&self.0, 12., TEXT))
+            },
+        )
     }
 }
 
 fn label(text: impl AsRef<str>, size: f32, color: u32) -> Div {
-    highlighted_label(text, size, color, "")
+    highlighted_label(text, size, color, "", None)
 }
 
-fn highlighted_label(text: impl AsRef<str>, size: f32, color: u32, query: &str) -> Div {
+fn highlighted_label(
+    text: impl AsRef<str>,
+    size: f32,
+    color: u32,
+    query: &str,
+    truncated: Option<Rc<Cell<bool>>>,
+) -> Div {
     let highlights = crate::text::search_ranges(text.as_ref(), query)
         .into_iter()
         .map(|range| {
@@ -2634,6 +2714,7 @@ fn highlighted_label(text: impl AsRef<str>, size: f32, color: u32, query: &str) 
         .child(crate::text::CrispText(
             text.as_ref().to_owned().into(),
             highlights,
+            truncated,
         ))
 }
 

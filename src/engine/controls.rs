@@ -119,10 +119,7 @@ impl Manager {
             let mut restart = Vec::new();
             for job in &jobs {
                 let data = job.data.lock().unwrap();
-                if matches!(
-                    data.status,
-                    Status::Queued | Status::Connecting | Status::Downloading
-                ) {
+                if data.status.can_pause_transfer() {
                     restart.push(data.id);
                 }
                 job.editing.store(true, Ordering::SeqCst);
@@ -196,7 +193,7 @@ impl Manager {
                 let data = job.data.lock().unwrap();
                 ensure!(!job.deleting.load(Ordering::SeqCst), "Wait for deletion to finish.");
                 ensure!(!job.editing.swap(true, Ordering::SeqCst), "This download is already being changed.");
-                matches!(data.status, Status::Queued | Status::Connecting | Status::Downloading)
+                data.status.can_pause_transfer()
             };
             let result = async {
                 manager.pause(id);

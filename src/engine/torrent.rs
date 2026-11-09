@@ -56,7 +56,7 @@ impl Manager {
         let response = tokio::select! {
             result = session.add_torrent(add, Some(AddTorrentOptions { paused: true, overwrite: true,
                 list_only: d.selected_files.is_none(), only_files: d.selected_files.clone(),
-                output_folder: Some(content.to_string_lossy().into_owned()), peer_limit: Some(d.connections),
+                output_folder: Some(content.to_string_lossy().into_owned()), peer_limit: Some(if d.connections == AUTO_CONNECTIONS { DEFAULT_NON_HTTP_CONNECTIONS } else { d.connections }),
                 ratelimits: librqbit::limits::LimitsConfig { download_bps: std::num::NonZeroU32::new(job.effective_speed_limit().min(u32::MAX as u64) as u32), ..Default::default() }, ..Default::default() })) => result?,
             _ = stopped(job) => bail!("Transfer stopped"),
         };

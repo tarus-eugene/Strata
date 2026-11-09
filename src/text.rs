@@ -5,6 +5,7 @@ use gpui::*;
 pub struct CrispText(
     pub SharedString,
     pub Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    pub Option<std::rc::Rc<std::cell::Cell<bool>>>,
 );
 
 pub fn search_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
@@ -155,12 +156,16 @@ impl Element for CrispText {
                 .text_system()
                 .line_wrapper(style.font(), style.font_size.to_pixels(window.rem_size()))
                 .truncate_line(self.0.clone(), bounds.size.width, &suffix, &mut runs);
+            let shortened = text != self.0;
             let line = window.text_system().shape_line(
                 text,
                 style.font_size.to_pixels(window.rem_size()),
                 &runs,
                 None,
             );
+            if let Some(truncated) = &self.2 {
+                truncated.set(shortened || line.width > bounds.size.width);
+            }
             bounds.origin = aligned_origin(
                 bounds.origin,
                 line.ascent,

@@ -4,7 +4,7 @@ A native Windows download manager built with Rust and GPUI. Downloads run in a p
 
 ## Installation
 
-Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.4-x64.exe`.
+Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.5-x64.exe`.
 
 The installer supports Windows 10 version 2004 or later and Windows 11 on x64-compatible systems. A working GPU driver is required. Installation is per Windows account and does not require administrator access. The default location is `%LOCALAPPDATA%\Programs\101 Downloader`.
 
@@ -26,9 +26,11 @@ The app must be fully closed through **Quit 101 Downloader** in the tray menu be
 | **Cancel** | Stops a transfer while retaining partial data. |
 | **Delete from device** | Waits for writes to stop, deletes owned output and partial data, and removes the entry after successful cleanup. Failures leave the entry available for retry. |
 
-Up to three downloads run simultaneously. Settings provides a destination folder and connection counts of 1, 4, 8, or 16. Small files and servers without range support use fewer connections.
+Up to three downloads run simultaneously. In Settings, choose Auto or a limit of 1, 4, 8, or 16 connections. Auto uses the HTTP file size and server range support to choose a count. Auto is the default for new installations, and saved settings keep their selected count.
 
-The bottom details panel shows the selected download's destination, source, completion time, priority, limit, and segmented progress. Its divider supports dragging and **Up/Down** keyboard resizing; the height is remembered. The footer chevron collapses or restores the panel. Tables, Settings, and overflowing dialogs have draggable scrollbars. Smooth wheel scrolling respects Windows animation preferences.
+Hover over a clipped table row to see the full filename. Drag a completed row to copy its file or folder to File Explorer or another app that accepts file drops.
+
+The bottom details panel shows the selected download's full filename, destination, source, completion time, priority, limit, and segmented progress. Its divider supports dragging and **Up/Down** keyboard resizing, and the height is remembered. The footer chevron collapses or restores the panel. Tables, Settings, and overflowing dialogs have draggable scrollbars. Smooth wheel scrolling respects Windows animation preferences.
 
 The **Created** column and **Completed at** details use Windows date and local-time preferences, including the system's 12/24-hour setting. Older completed entries without a saved completion timestamp show a dash. Speed and ETA use a six-second rolling window, time-based smoothing, and at most one speed update per second. Estimates warm up for two seconds; a three-second stall clears stale speed and ETA. Unknown-size and stopped transfers have no ETA. Search highlights matching filename text and shows matching websites beneath filenames.
 
@@ -161,7 +163,7 @@ Media helpers come from their official release repositories and are checked agai
 
 HTTP downloads probe with `Range: bytes=0-0` and request identity encoding. Parallel transfers require a valid `206 Content-Range`, a known size, and a strong ETag or Last-Modified validator. Non-overlapping ranges enter a shared queue with a target size of 4 MiB and at least the configured worker count. Workers reuse pooled connections and maintain separate part files.
 
-Every range response is checked for size, encoding, range bounds, and validator consistency. Broken connections are retried up to three times from the actual saved length. Idle workers can split a slow range's remaining bytes after its writer stops and flushes. Resume probes compare size and validator before reusing parts. Completed parts are assembled in order and published without replacing an existing path.
+Every range response is checked for size, encoding, range bounds, and validator consistency. Broken connections are retried up to three times from the actual saved length. A transfer interrupted by a temporary network or server error gets up to three more attempts, with waits of one, two, and four seconds. You can pause or cancel during the wait. Idle workers can split a slow range's remaining bytes after its writer stops and flushes. Resume probes compare size and validator before reusing parts. Completed parts are assembled in order and published without replacing an existing path.
 
 Servers without range support, validators, or a known size use a single full-file transfer that restarts on resume. Parallel connections cannot increase the underlying connection's bandwidth.
 

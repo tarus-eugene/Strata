@@ -39,12 +39,16 @@ const RUN: u8 = 0;
 const PAUSE: u8 = 1;
 const CANCEL: u8 = 2;
 const MIN_PART: u64 = 256 * 1024;
+pub const AUTO_CONNECTIONS: usize = 0;
+const DEFAULT_NON_HTTP_CONNECTIONS: usize = 8;
+const DOWNLOAD_RETRIES: u32 = 3;
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     Queued,
     Connecting,
+    Retrying,
     SelectingFiles,
     Downloading,
     Pausing,
@@ -63,6 +67,7 @@ impl Status {
         match self {
             Self::Queued => "Queued",
             Self::Connecting => "Connecting",
+            Self::Retrying => "Retrying",
             Self::SelectingFiles => "Choose files",
             Self::Downloading => "Downloading",
             Self::Pausing => "Pausing",
@@ -80,10 +85,18 @@ impl Status {
         matches!(
             self,
             Self::Connecting
+                | Self::Retrying
                 | Self::Downloading
                 | Self::Pausing
                 | Self::Assembling
                 | Self::Verifying
+        )
+    }
+
+    pub fn can_pause_transfer(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Connecting | Self::Retrying | Self::Downloading
         )
     }
 }
@@ -233,7 +246,7 @@ impl Default for Settings {
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             directory: home.join("Downloads"),
-            connections: 8,
+            connections: AUTO_CONNECTIONS,
             transport: TransferOptions::default(),
             details_height: default_details_height(),
             speed_limit: 0,
@@ -536,7 +549,7 @@ impl Manager {
                 validator: None,
                 ranged: false,
                 error: None,
-                connections: connections.clamp(1, 16),
+                connections: connections.min(16),
                 created: id / 1_000_000,
                 completed_at: None,
                 referrer,
@@ -712,10 +725,7 @@ impl Manager {
     pub fn pause(&self, id: u64) {
         if let Some(job) = self.find(id) {
             let mut d = job.data.lock().unwrap();
-            if matches!(
-                d.status,
-                Status::Queued | Status::Connecting | Status::Downloading | Status::SelectingFiles
-            ) {
+            if d.status.can_pause_transfer() || d.status == Status::SelectingFiles {
                 job.control.store(PAUSE, Ordering::SeqCst);
                 d.status = if job.running.load(Ordering::SeqCst) {
                     Status::Pausing
@@ -779,8 +789,9 @@ impl Manager {
         let result = (|| -> Result<()> {
             let parent = self.history.parent().context("Missing history folder")?;
             fs::create_dir_all(parent)?;
+            let settings = self.settings.lock().unwrap().clone();
             let history = History {
-                settings: self.settings.lock().unwrap().clone(),
+                settings,
                 downloads: self.snapshots(),
             };
             let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -815,7 +826,7 @@ impl Manager {
         }
         let manager = self.clone();
         self.runtime.spawn(async move {
-            let result = manager.execute(&job).await;
+            let result = manager.execute_with_retries(&job).await;
             {
                 let mut d = job.data.lock().unwrap();
                 if job.deleting.load(Ordering::SeqCst) {
@@ -832,10 +843,33 @@ impl Manager {
                         }
                     }
                 }
+                job.running.store(false, Ordering::SeqCst);
             }
-            job.running.store(false, Ordering::SeqCst);
             manager.persist();
         });
+    }
+
+    async fn execute_with_retries(&self, job: &Arc<Job>) -> Result<()> {
+        for attempt in 0.. {
+            let result = self.execute(job).await;
+            if attempt == DOWNLOAD_RETRIES || !result.as_ref().is_err_and(retryable_transfer_error)
+            {
+                return result;
+            }
+            {
+                let mut data = job.data.lock().unwrap();
+                check_running(job)?;
+                data.status = Status::Retrying;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(1 << attempt)) => {},
+                _ = stopped(job) => bail!("Transfer stopped"),
+            }
+            let mut data = job.data.lock().unwrap();
+            check_running(job)?;
+            data.status = Status::Queued;
+        }
+        unreachable!()
     }
 
     async fn execute(&self, job: &Arc<Job>) -> Result<()> {
@@ -852,14 +886,17 @@ impl Manager {
                             .then_some((std::cmp::Reverse(d.priority), d.id))
                     })
                     .min();
+                let mut data = job.data.lock().unwrap();
+                check_running(job)?;
                 if !self.global_editing.load(Ordering::SeqCst)
-                    && next.is_some_and(|(_, id)| id == job.data.lock().unwrap().id)
+                    && next.is_some_and(|(_, id)| id == data.id)
                 {
-                    let protocol = job.data.lock().unwrap().protocol;
                     // shortcut: global-capped external jobs run alone; use shared streaming when concurrency is needed.
                     let slots = if self.settings.lock().unwrap().speed_limit > 0
-                        && !matches!(protocol, Protocol::Http | Protocol::WebDav | Protocol::Sftp)
-                    {
+                        && !matches!(
+                            data.protocol,
+                            Protocol::Http | Protocol::WebDav | Protocol::Sftp
+                        ) {
                         3
                     } else {
                         1
@@ -867,7 +904,7 @@ impl Manager {
                     self.slots
                         .try_acquire_many(slots)
                         .ok()
-                        .inspect(|_| job.data.lock().unwrap().status = Status::Connecting)
+                        .inspect(|_| data.status = Status::Connecting)
                 } else {
                     None
                 }
@@ -881,7 +918,6 @@ impl Manager {
             }
         };
         check_running(job)?;
-        job.data.lock().unwrap().status = Status::Connecting;
         let protocol = job.data.lock().unwrap().protocol;
         match protocol {
             Protocol::Http | Protocol::WebDav => self.execute_http(job).await,
@@ -952,10 +988,13 @@ impl Manager {
                     "The server returned too much data for the range probe"
                 );
             }
-            ensure!(
-                received == 1,
-                "The range probe ended before its byte arrived"
-            );
+            if received != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "The range probe ended before its byte arrived",
+                )
+                .into());
+            }
         } else {
             drop(probe);
         }
@@ -976,7 +1015,7 @@ impl Manager {
             if reuse {
                 old.parts.clone()
             } else {
-                chunks::plan(size, old.connections)
+                chunks::plan(size, chunks::connections(Some(size), old.connections))
             }
         } else {
             vec![Part {
@@ -1066,6 +1105,48 @@ fn check_running(job: &Job) -> Result<()> {
     Ok(())
 }
 
+fn retryable_transfer_error(error: &anyhow::Error) -> bool {
+    use std::io::ErrorKind;
+    error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_timeout()
+                || error.is_connect()
+                || error.is_body()
+                || error.is_decode()
+                || matches!(
+                    error.status().map(|status| status.as_u16()),
+                    Some(408 | 429 | 500 | 502 | 503 | 504)
+                )
+        }) || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::TimedOut
+                    | ErrorKind::UnexpectedEof
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+            )
+        }) || cause.is::<tokio::time::error::Elapsed>()
+            || cause.downcast_ref::<russh::Error>().is_some_and(|error| {
+                matches!(
+                    error,
+                    russh::Error::ConnectionTimeout
+                        | russh::Error::KeepaliveTimeout
+                        | russh::Error::InactivityTimeout
+                        | russh::Error::Disconnect
+                )
+            })
+            || cause
+                .downcast_ref::<russh_sftp::client::error::Error>()
+                .is_some_and(|error| matches!(error, russh_sftp::client::error::Error::Timeout))
+            || cause
+                .downcast_ref::<tools::ToolExit>()
+                .is_some_and(|error| matches!(error.code, 5 | 6 | 7 | 18 | 28 | 52 | 55 | 56))
+    })
+}
+
 async fn download_part(
     client: Client,
     job: Arc<Job>,
@@ -1081,7 +1162,7 @@ async fn download_part(
             return result;
         }
         check_running(&job)?;
-        if attempt == 3 {
+        if attempt == 3 || !result.as_ref().is_err_and(retryable_transfer_error) {
             return result;
         }
         tokio::select! {
@@ -1216,17 +1297,22 @@ async fn transfer_part(
         data.downloaded = data.parts.iter().map(|p| p.downloaded).sum();
     }
     file.flush().await?;
-    if d.ranged {
-        ensure!(
-            received == part.len(),
-            "Connection ended before the whole range arrived"
-        );
-    } else if let Some(total) = job.data.lock().unwrap().total {
-        ensure!(
-            received == total,
-            "Connection ended before the file was complete"
-        );
+    let expected = if d.ranged {
+        Some(part.len())
+    } else {
+        job.data.lock().unwrap().total
+    };
+    if expected.is_some_and(|size| received < size) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Connection ended before all the expected bytes arrived",
+        )
+        .into());
     }
+    ensure!(
+        expected.is_none_or(|size| received == size),
+        "Server sent more bytes than expected"
+    );
     Ok(chunks::Outcome::Complete)
 }
 

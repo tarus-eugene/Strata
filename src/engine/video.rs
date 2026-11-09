@@ -17,8 +17,10 @@ impl Manager {
             "--no-playlist\n--continue\n--no-overwrites\n--no-simulate\n--windows-filenames\n--no-cache-dir\n--quiet\n--no-warnings\n--progress\n--newline\n--concurrent-fragments {}\n--paths {}\n--paths {}\n--output {}\n--progress-template {}\n--print {}\n",
             if job.effective_speed_limit() > 0 {
                 1
-            } else {
+            } else if d.connections != AUTO_CONNECTIONS {
                 d.connections
+            } else {
+                DEFAULT_NON_HTTP_CONNECTIONS
             },
             tools::config_value(&format!("home:{}", content.display())),
             tools::config_value(&format!("temp:{}", temporary.display())),
