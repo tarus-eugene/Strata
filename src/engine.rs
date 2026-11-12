@@ -33,7 +33,7 @@ mod tools;
 mod torrent;
 mod video;
 
-pub(crate) use controls::validate_name;
+pub(crate) use controls::{move_without_replacing, validate_name};
 
 pub use integrity::IntegrityFile;
 

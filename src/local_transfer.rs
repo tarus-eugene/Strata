@@ -1,7 +1,7 @@
-use crate::engine::{Manager, validate_name};
+use crate::engine::Manager;
 use anyhow::{Context, Result, ensure};
 use russh::{Channel, Disconnect, client, keys, server};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -10,6 +10,8 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+mod folder;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -22,6 +24,7 @@ use tokio::{
 
 pub const PORT: u16 = 46275;
 const USER: &str = "strata-transfer-v1";
+const FOLDER_USER: &str = "strata-folder-transfer-v1";
 const DISCOVERY: &[u8] = b"strata-transfer-v1 discovery";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -91,6 +94,8 @@ pub struct Offer {
     pub name: String,
     pub size: u64,
     pub sender: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_entries: Option<u32>,
 }
 
 pub struct Incoming {
@@ -102,7 +107,7 @@ pub struct Incoming {
 
 impl Incoming {
     pub fn accept(&mut self, directory: PathBuf, name: &str) -> Result<()> {
-        validate_name(name)?;
+        folder::validate_component(name)?;
         ensure!(
             !directory.as_os_str().is_empty() && directory.is_dir(),
             "Choose an existing download folder"
@@ -110,7 +115,7 @@ impl Incoming {
         let path = std::path::absolute(directory)?.join(name);
         ensure!(
             !path.try_exists()?,
-            "A file already uses that name. Choose another name or folder."
+            "The destination already exists. Choose another name or folder."
         );
         self.decision
             .take()
@@ -329,13 +334,17 @@ async fn discover(destination: (Ipv4Addr, u16), identity: Option<&str>) -> Resul
 
 type ServerChannel = Channel<server::Msg>;
 
-struct Receiver(Option<oneshot::Sender<ServerChannel>>);
+struct Receiver {
+    channel: Option<oneshot::Sender<(ServerChannel, bool)>>,
+    folder: bool,
+}
 
 impl server::Handler for Receiver {
     type Error = anyhow::Error;
 
     async fn auth_none(&mut self, user: &str) -> Result<server::Auth> {
-        Ok(if user == USER {
+        self.folder = user == FOLDER_USER;
+        Ok(if user == USER || self.folder {
             server::Auth::Accept
         } else {
             server::Auth::reject()
@@ -348,9 +357,9 @@ impl server::Handler for Receiver {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<()> {
-        if let Some(deliver) = self.0.take() {
+        if let Some(deliver) = self.channel.take() {
             reply.accept().await;
-            let _ = deliver.send(channel);
+            let _ = deliver.send((channel, self.folder));
         }
         Ok(())
     }
@@ -391,15 +400,22 @@ async fn receive_connection(
     let (deliver, channel) = oneshot::channel();
     let mut session = timeout(
         SETUP_TIMEOUT,
-        server::run_stream(config, socket, Receiver(Some(deliver))),
+        server::run_stream(
+            config,
+            socket,
+            Receiver {
+                channel: Some(deliver),
+                folder: false,
+            },
+        ),
     )
     .await??;
     let disconnect = session.handle();
     tokio::select! {
         _ = &mut session => {},
         _ = async {
-            if let Ok(Ok(channel)) = timeout(SETUP_TIMEOUT, channel).await {
-                let _ = receive(channel.into_stream(), address, code, incoming).await;
+            if let Ok(Ok((channel, folder))) = timeout(SETUP_TIMEOUT, channel).await {
+                let _ = receive(channel.into_stream(), address, code, incoming, folder).await;
             }
         } => {
             let _ = timeout(SETUP_TIMEOUT, disconnect.disconnect(Disconnect::ByApplication, "Transfer closed".into(), String::new())).await;
@@ -413,9 +429,18 @@ async fn receive(
     address: SocketAddr,
     code: String,
     incoming: mpsc::Sender<Incoming>,
+    folder_session: bool,
 ) -> Result<()> {
-    let mut offer: Offer = timeout(SETUP_TIMEOUT, read_offer(&mut stream)).await??;
-    validate_name(&offer.name)?;
+    let mut offer: Offer = timeout(SETUP_TIMEOUT, read_metadata(&mut stream, MAX_OFFER)).await??;
+    folder::validate_component(&offer.name)?;
+    let folder_entries = offer.folder_entries;
+    ensure!(
+        folder_entries.is_some() == folder_session,
+        "Transfer kind does not match the connection"
+    );
+    if let Some(entries) = folder_entries {
+        folder::validate_offer(entries, offer.size)?;
+    }
     offer.sender = clean_name(&offer.sender);
     let size = offer.size;
     let (progress, mut cancel, operation) = operation(State::Waiting(code));
@@ -449,7 +474,12 @@ async fn receive(
     };
     let result = tokio::select! {
         _ = &mut cancel => Err(anyhow::anyhow!("Transfer cancelled")),
-        result = receive_file(&mut stream, &path, size, &progress) => result,
+        result = async {
+            match folder_entries {
+                Some(entries) => folder::receive(&mut stream, &path, entries, size, &progress).await,
+                None => receive_file(&mut stream, &path, size, &progress).await,
+            }
+        } => result,
     };
     let reply = if result.is_ok() { SAVED } else { FAILED };
     publish(&progress, result);
@@ -474,15 +504,8 @@ async fn receive_file(
     let mut file = File::from_std(temp.reopen()?);
     stream.write_u8(ACCEPT).await?;
     stream.flush().await?;
-    let mut input = (&mut *stream).take(size);
-    let digest = copy_file(&mut input, &mut file, size, progress).await?;
-    let mut expected = [0; 32];
-    timeout(IO_TIMEOUT, stream.read_exact(&mut expected)).await??;
-    ensure!(
-        digest == expected,
-        "The received file failed its integrity check"
-    );
-    file.sync_all().await?;
+    let mut transfer = TransferProgress::new(size, progress);
+    receive_verified_file(stream, &mut file, size, &mut transfer).await?;
     drop(file);
     temp.persist_noclobber(path)
         .context("Could not save the file at the chosen destination")?;
@@ -522,20 +545,30 @@ async fn send(
     own: Option<String>,
     progress: &watch::Sender<State>,
 ) -> Result<State> {
-    let file = File::open(&path)
+    let metadata = tokio::fs::metadata(&path)
         .await
-        .context("Could not open the selected file")?;
-    let metadata = file.metadata().await?;
-    ensure!(metadata.is_file(), "Choose a file to transfer");
+        .context("Could not open the selected item")?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .context("The file name is invalid")?;
-    validate_name(name)?;
+        .context("Choose a named file or folder")?
+        .to_owned();
+    folder::validate_component(&name)?;
+    let source = if metadata.is_dir() {
+        Source::Folder(folder::Folder::scan(path).await?)
+    } else {
+        let file = File::open(&path)
+            .await
+            .context("Could not open the selected file")?;
+        let metadata = file.metadata().await?;
+        ensure!(metadata.is_file(), "Choose a regular file or folder");
+        Source::File(file, metadata.len())
+    };
     let offer = Offer {
-        name: name.into(),
-        size: metadata.len(),
+        name,
+        size: source.size(),
         sender: computer_name(),
+        folder_entries: source.folder_entries(),
     };
     let actual = Arc::new(Mutex::new(None));
     let handler = Sender {
@@ -546,10 +579,17 @@ async fn send(
     let mut session = timeout(SETUP_TIMEOUT, client::connect(Arc::new(client::Config::default()), (target.address, port), handler))
         .await.context("The target did not respond. Check the Ethernet connection and whether 101 Downloader is open there.")??;
     let result = async {
-        let auth = timeout(SETUP_TIMEOUT, session.authenticate_none(USER)).await??;
+        let folder = offer.folder_entries.is_some();
+        let user = if folder { FOLDER_USER } else { USER };
+        let auth = timeout(SETUP_TIMEOUT, session.authenticate_none(user)).await??;
         ensure!(
             auth.success(),
-            "The target rejected the transfer connection"
+            "{}",
+            if folder {
+                "The target rejected folder sharing. Use the updated app on both computers."
+            } else {
+                "The target rejected the transfer connection"
+            }
         );
         let channel = timeout(SETUP_TIMEOUT, session.channel_open_session()).await??;
         let fingerprint = actual
@@ -558,7 +598,7 @@ async fn send(
             .take()
             .context("Missing target identity")?;
         let mut stream = channel.into_stream();
-        write_offer(&mut stream, &offer).await?;
+        write_metadata(&mut stream, &offer, MAX_OFFER).await?;
         progress.send_replace(State::Waiting(code(&fingerprint)));
         match timeout(APPROVAL_TIMEOUT + SETUP_TIMEOUT, stream.read_u8())
             .await
@@ -566,18 +606,19 @@ async fn send(
         {
             DECLINE => return Ok(State::Declined),
             ACCEPT => {}
-            _ => anyhow::bail!("The target could not save the file"),
+            _ => anyhow::bail!("The target could not prepare the destination"),
         }
-        let mut input = file.take(offer.size);
-        let digest = copy_file(&mut input, &mut stream, offer.size, progress).await?;
-        timeout(IO_TIMEOUT, async {
-            stream.write_all(&digest).await?;
-            stream.flush().await
-        })
-        .await??;
+        let mut transfer = TransferProgress::new(offer.size, progress);
+        match source {
+            Source::File(file, size) => {
+                send_verified_file(&mut stream, file, size, &mut transfer).await?
+            }
+            Source::Folder(folder) => folder.send(&mut stream, &mut transfer).await?,
+        }
+        timeout(IO_TIMEOUT, stream.flush()).await??;
         ensure!(
             timeout(IO_TIMEOUT, stream.read_u8()).await?? == SAVED,
-            "The target could not verify or save the file"
+            "The target could not verify or save the transfer"
         );
         Ok(State::Finished(None))
     }
@@ -590,17 +631,48 @@ async fn send(
     result
 }
 
-async fn read_offer(stream: &mut (impl AsyncRead + Unpin)) -> Result<Offer> {
+enum Source {
+    File(File, u64),
+    Folder(folder::Folder),
+}
+
+impl Source {
+    fn size(&self) -> u64 {
+        match self {
+            Self::File(_, size) => *size,
+            Self::Folder(folder) => folder.size(),
+        }
+    }
+
+    fn folder_entries(&self) -> Option<u32> {
+        match self {
+            Self::File(..) => None,
+            Self::Folder(folder) => Some(folder.entry_count()),
+        }
+    }
+}
+
+async fn read_metadata<T: DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+    limit: usize,
+) -> Result<T> {
     let size = stream.read_u32().await? as usize;
-    ensure!((1..=MAX_OFFER).contains(&size), "Invalid transfer offer");
+    ensure!(
+        (1..=limit).contains(&size),
+        "Invalid transfer metadata size"
+    );
     let mut data = vec![0; size];
     stream.read_exact(&mut data).await?;
     Ok(serde_json::from_slice(&data)?)
 }
 
-async fn write_offer(stream: &mut (impl AsyncWrite + Unpin), offer: &Offer) -> Result<()> {
-    let data = serde_json::to_vec(offer)?;
-    ensure!(data.len() <= MAX_OFFER, "The transfer offer is too large");
+async fn write_metadata(
+    stream: &mut (impl AsyncWrite + Unpin),
+    value: &impl Serialize,
+    limit: usize,
+) -> Result<()> {
+    let data = serde_json::to_vec(value)?;
+    ensure!(data.len() <= limit, "The transfer metadata is too large");
     timeout(IO_TIMEOUT, async {
         stream.write_u32(data.len() as u32).await?;
         stream.write_all(&data).await?;
@@ -610,30 +682,73 @@ async fn write_offer(stream: &mut (impl AsyncWrite + Unpin), offer: &Offer) -> R
     Ok(())
 }
 
+async fn send_verified_file(
+    stream: &mut (impl AsyncWrite + Unpin),
+    file: File,
+    size: u64,
+    progress: &mut TransferProgress<'_>,
+) -> Result<()> {
+    let digest = copy_file(&mut file.take(size), stream, size, progress).await?;
+    timeout(IO_TIMEOUT, stream.write_all(&digest)).await??;
+    Ok(())
+}
+
+async fn receive_verified_file(
+    stream: &mut (impl AsyncRead + Unpin),
+    file: &mut File,
+    size: u64,
+    progress: &mut TransferProgress<'_>,
+) -> Result<()> {
+    let digest = copy_file(&mut (&mut *stream).take(size), file, size, progress).await?;
+    let mut expected = [0; 32];
+    timeout(IO_TIMEOUT, stream.read_exact(&mut expected)).await??;
+    ensure!(
+        digest == expected,
+        "The received file failed its integrity check"
+    );
+    file.sync_all().await?;
+    Ok(())
+}
+
+struct TransferProgress<'a> {
+    bytes: u64,
+    total: u64,
+    status: &'a watch::Sender<State>,
+    buffer: Vec<u8>,
+}
+
+impl<'a> TransferProgress<'a> {
+    fn new(total: u64, status: &'a watch::Sender<State>) -> Self {
+        status.send_replace(State::Transferring { bytes: 0, total });
+        Self {
+            bytes: 0,
+            total,
+            status,
+            buffer: vec![0; 128 * 1024],
+        }
+    }
+}
+
 async fn copy_file(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     size: u64,
-    progress: &watch::Sender<State>,
+    progress: &mut TransferProgress<'_>,
 ) -> Result<[u8; 32]> {
-    let mut buffer = vec![0; 128 * 1024];
     let mut sha = Sha256::new();
     let mut transferred = 0;
-    progress.send_replace(State::Transferring {
-        bytes: 0,
-        total: size,
-    });
     loop {
-        let count = timeout(IO_TIMEOUT, reader.read(&mut buffer)).await??;
+        let count = timeout(IO_TIMEOUT, reader.read(&mut progress.buffer)).await??;
         if count == 0 {
             break;
         }
-        sha.update(&buffer[..count]);
-        timeout(IO_TIMEOUT, writer.write_all(&buffer[..count])).await??;
+        sha.update(&progress.buffer[..count]);
+        timeout(IO_TIMEOUT, writer.write_all(&progress.buffer[..count])).await??;
         transferred += count as u64;
-        progress.send_replace(State::Transferring {
-            bytes: transferred,
-            total: size,
+        progress.bytes += count as u64;
+        progress.status.send_replace(State::Transferring {
+            bytes: progress.bytes,
+            total: progress.total,
         });
     }
     ensure!(
@@ -714,6 +829,75 @@ mod tests {
         );
         assert_eq!(std::fs::read(existing).unwrap(), b"keep");
         listener.abort();
+    }
+
+    #[tokio::test]
+    async fn folder_transfer_preserves_nested_and_empty_items() {
+        let (port, mut incoming, listener) = loopback().await;
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let folder = source.path().join("shared.docs");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::create_dir(folder.join("empty")).unwrap();
+        let nested = (0..300_000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        std::fs::write(folder.join("sub").join("café.bin"), &nested).unwrap();
+        std::fs::write(folder.join("sub").join("empty.bin"), []).unwrap();
+        std::fs::write(folder.join("header.txt"), b"header").unwrap();
+
+        let (progress, _, _) = operation(State::Connecting);
+        let target = Target::manual("127.0.0.1").unwrap();
+        let sender = tokio::spawn(async move { send(target, folder, port, None, &progress).await });
+        let mut offer = timeout(SETUP_TIMEOUT, incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(offer.offer.name, "shared.docs");
+        assert_eq!(offer.offer.folder_entries, Some(5));
+        assert_eq!(offer.offer.size, nested.len() as u64 + 6);
+        assert!(matches!(offer.operation.state(), State::Waiting(_)));
+        assert!(
+            std::fs::read_dir(destination.path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        offer.accept(destination.path().into(), "received").unwrap();
+        let result = timeout(SETUP_TIMEOUT, sender)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, State::Finished(None)));
+        let received = destination.path().join("received");
+        assert_eq!(
+            std::fs::read(received.join("sub").join("café.bin")).unwrap(),
+            nested
+        );
+        assert_eq!(
+            std::fs::read(received.join("sub").join("empty.bin")).unwrap(),
+            b""
+        );
+        assert_eq!(
+            std::fs::read(received.join("header.txt")).unwrap(),
+            b"header"
+        );
+        assert!(
+            std::fs::read_dir(received.join("empty"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
+        listener.abort();
+    }
+
+    #[test]
+    fn legacy_file_offers_keep_their_wire_format() {
+        let data = r#"{"name":"test.txt","size":100,"sender":"Test"}"#;
+        let offer: Offer = serde_json::from_str(data).unwrap();
+        assert!(offer.folder_entries.is_none());
+        assert_eq!(serde_json::to_string(&offer).unwrap(), data);
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn move_without_replacing(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn move_without_replacing(from: &Path, to: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

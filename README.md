@@ -4,7 +4,7 @@ A native Windows download manager built with Rust and GPUI. Downloads run in a p
 
 ## Installation
 
-Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.7-x64.exe`.
+Windows installers and SHA-256 checksums are available from [GitHub Releases](https://github.com/tarus-eugene/Strata/releases/latest). The current installer is `101-Downloader-Setup-0.3.8-x64.exe`.
 
 The installer supports Windows 10 version 2004 or later and Windows 11 on x64-compatible systems. A working GPU driver is required. Installation is per Windows account and does not require administrator access. The default location is `%LOCALAPPDATA%\Programs\101 Downloader`.
 
@@ -81,9 +81,9 @@ Recognized video hosts include YouTube, Vimeo, Twitch, TikTok, and Instagram; `-
 
 ## Local Ethernet transfers
 
-Run 101 Downloader on both Windows computers. On the sender, use the chevron beside **New download** to switch to **New transfer**, then open it. Select the target from **Nearby devices**, or enter the target computer’s Ethernet IPv4 address from `ipconfig`. Choose a file and click **Send request**.
+Run 101 Downloader on both Windows computers. On the sender, use the chevron beside **New download** to switch to **New transfer**, then open it. Select the target from **Nearby devices**, or enter the target computer’s Ethernet IPv4 address from `ipconfig`. Choose a file or folder and click **Send request**.
 
-On the target, the incoming dialog shows the sender, file, size, and a target code that also appears on the sender’s screen. The target user can change the filename and save folder, choose a completion action, then accept or decline. The file is sent over an encrypted connection after acceptance and is saved after its checksum is verified. Progress and the final result appear in the transfer dialogs.
+On the target, the incoming dialog shows the sender, item name, size, and a target code that also appears on the sender’s screen. The recipient can change the name and save folder, choose a completion action, then accept or decline. Data is sent over an encrypted connection after acceptance and saved after each file’s checksum is verified. Folder transfers require v0.3.8 or later on both computers and preserve subfolders and empty folders. Progress and the final result appear in the transfer dialogs.
 
 Transfers use TCP port `46275` and device discovery uses UDP on the same port. Both computers need reachable private or link-local IPv4 addresses on the Ethernet link. Entering the target’s IP directly works when broadcast discovery is unavailable.
 

@@ -10,6 +10,7 @@ pub(super) struct TransferUi {
     name: Entity<TextInput>,
     directory: Entity<TextInput>,
     refresh_focus: FocusHandle,
+    folder_focus: FocusHandle,
     peers: Vec<Target>,
     discovering: bool,
     discovery_notice: Option<String>,
@@ -20,7 +21,7 @@ pub(super) struct TransferUi {
 
 enum Dialog {
     Send {
-        file: Option<PathBuf>,
+        item: Option<PathBuf>,
         operation: Option<Operation>,
         error: Option<String>,
     },
@@ -44,6 +45,7 @@ impl TransferUi {
             name: cx.new(|cx| TextInput::new("File name", window, cx)),
             directory: cx.new(|cx| TextInput::new("Choose a folder", window, cx)),
             refresh_focus: cx.focus_handle(),
+            folder_focus: cx.focus_handle(),
             peers: Vec::new(),
             discovering: false,
             discovery_notice: None,
@@ -116,7 +118,7 @@ impl Strata {
         self.menu = None;
         self.settings_open = false;
         self.local_transfer.dialog = Some(Dialog::Send {
-            file: None,
+            item: None,
             operation: None,
             error: None,
         });
@@ -147,7 +149,12 @@ impl Strata {
         cx.notify();
     }
 
-    fn browse_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn browse_transfer(
+        &mut self,
+        choose_folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let sending = matches!(
             self.local_transfer.dialog,
             Some(Dialog::Send {
@@ -156,14 +163,16 @@ impl Strata {
             })
         );
         let prompt = cx.prompt_for_paths(PathPromptOptions {
-            files: sending,
-            directories: !sending,
+            files: sending && !choose_folder,
+            directories: !sending || choose_folder,
             multiple: false,
             prompt: Some(
-                if sending {
+                if sending && choose_folder {
+                    "Choose a folder to send"
+                } else if sending {
                     "Choose a file to send"
                 } else {
-                    "Choose where to save the received file"
+                    "Choose a save location"
                 }
                 .into(),
             ),
@@ -176,11 +185,11 @@ impl Strata {
                     let transfer = &mut this.local_transfer;
                     match &mut transfer.dialog {
                         Some(Dialog::Send {
-                            file,
+                            item,
                             operation: None,
                             error,
                         }) if sending => {
-                            *file = Some(path);
+                            *item = Some(path);
                             *error = None;
                         }
                         Some(Dialog::Receive {
@@ -207,7 +216,7 @@ impl Strata {
         let transfer = &mut self.local_transfer;
         match &mut transfer.dialog {
             Some(Dialog::Send {
-                file,
+                item,
                 operation,
                 error,
             }) if operation.is_none() => {
@@ -219,10 +228,10 @@ impl Strata {
                         .find(|peer| peer.address == target.address)
                         .cloned()
                         .unwrap_or(target);
-                    let file = file
+                    let item = item
                         .clone()
-                        .ok_or_else(|| anyhow::anyhow!("Choose a file to send"))?;
-                    Ok::<_, anyhow::Error>(transfer.service.send(target, file))
+                        .ok_or_else(|| anyhow::anyhow!("Choose a file or folder to send"))?;
+                    Ok::<_, anyhow::Error>(transfer.service.send(target, item))
                 })();
                 match result {
                     Ok(sending) => {
@@ -335,7 +344,13 @@ impl Strata {
             transfer.suspended_send = transfer.dialog.take();
             transfer.name.update(cx, |input, cx| {
                 input.set_value(&incoming.offer.name, cx);
-                input.select_prefix(filename_selection_end(&incoming.offer.name, false), cx);
+                input.select_prefix(
+                    filename_selection_end(
+                        &incoming.offer.name,
+                        incoming.offer.folder_entries.is_some(),
+                    ),
+                    cx,
+                );
             });
             transfer.directory.update(cx, |input, cx| {
                 input.set_value(&self.directory.to_string_lossy(), cx)
@@ -366,10 +381,10 @@ impl Strata {
     ) -> impl IntoElement {
         let content = match self.local_transfer.dialog.as_ref().unwrap() {
             Dialog::Send {
-                file,
+                item,
                 operation,
                 error,
-            } => self.send_transfer_form(file.as_ref(), operation.as_ref(), error.as_deref(), cx),
+            } => self.send_transfer_form(item.as_ref(), operation.as_ref(), error.as_deref(), cx),
             Dialog::Receive {
                 incoming,
                 accepted,
@@ -423,7 +438,7 @@ impl Strata {
 
     fn send_transfer_form(
         &self,
-        file: Option<&PathBuf>,
+        item: Option<&PathBuf>,
         operation: Option<&Operation>,
         error: Option<&str>,
         cx: &mut Context<Self>,
@@ -437,9 +452,9 @@ impl Strata {
             .child(self.transfer_header("New transfer", cx));
         if let Some(operation) = operation {
             return form
-                .children(file.map(|file| {
+                .children(item.map(|item| {
                     label(
-                        file.file_name().unwrap_or_default().to_string_lossy(),
+                        item.file_name().unwrap_or_default().to_string_lossy(),
                         13.,
                         TEXT,
                     )
@@ -471,8 +486,11 @@ impl Strata {
             .child(div().flex().items_center().gap(px(10.))
                 .child(button("select-transfer-file", "Choose file", Icon::File, false)
                     .track_focus(&self.modal_choose_focus)
-                    .on_click(cx.listener(|this, _, window, cx| this.browse_transfer(window, cx))))
-                .children(file.map(|file| label(file.display().to_string(), 12., MUTED).truncate())))
+                    .on_click(cx.listener(|this, _, window, cx| this.browse_transfer(false, window, cx))))
+                .child(button("select-transfer-folder", "Choose folder", Icon::Folder, false)
+                    .track_focus(&transfer.folder_focus)
+                    .on_click(cx.listener(|this, _, window, cx| this.browse_transfer(true, window, cx))))
+                .children(item.map(|item| label(item.display().to_string(), 12., MUTED).min_w_0().flex_1().truncate())))
             .children(transfer.service.receive_error.as_deref().map(|error| label(error, 12., AMBER)))
             .children(error.map(|error| label(error, 12., RED)))
             .child(div().flex().justify_end().child(button("send-local-transfer", "Send request", Icon::Arrow, true)
@@ -489,6 +507,7 @@ impl Strata {
         cx: &mut Context<Self>,
     ) -> Div {
         let state = incoming.operation.state();
+        let folder = incoming.offer.folder_entries.is_some();
         let form = div()
             .p(px(22.))
             .flex()
@@ -506,7 +525,16 @@ impl Strata {
                         "From",
                         &format!("{} · {}", incoming.offer.sender, incoming.address.ip()),
                     ))
-                    .child(detail_line("File", &incoming.offer.name))
+                    .child(detail_line(
+                        if folder { "Folder" } else { "File" },
+                        &incoming.offer.name,
+                    ))
+                    .children(
+                        incoming
+                            .offer
+                            .folder_entries
+                            .map(|count| detail_line("Items", &count.to_string())),
+                    )
                     .child(detail_line("Size", &bytes(incoming.offer.size))),
             );
         let State::Waiting(code) = state else {
@@ -521,7 +549,7 @@ impl Strata {
             MUTED,
         ))
         .child(transport_input(
-            "File name",
+            if folder { "Folder name" } else { "File name" },
             self.local_transfer.name.clone(),
         ))
         .child(
@@ -539,7 +567,7 @@ impl Strata {
                         .h(px(40.))
                         .track_focus(&self.modal_choose_focus)
                         .on_click(
-                            cx.listener(|this, _, window, cx| this.browse_transfer(window, cx)),
+                            cx.listener(|this, _, window, cx| this.browse_transfer(true, window, cx)),
                         ),
                 ),
         )
@@ -575,6 +603,7 @@ impl Strata {
                 )
                 .children(match completion {
                     None => None,
+                    Some(CompletionAction::Open) if folder => Some(label("Opens the received folder.", 12., MUTED)),
                     Some(CompletionAction::Open) => Some(label("Opens the file if it is a Windows program, or opens the destination folder.", 12., MUTED)),
                     Some(_) => Some(label("This action affects the whole PC when the transfer finishes.", 12., MUTED)),
                 }),
@@ -615,7 +644,7 @@ impl Strata {
 
     fn transfer_progress(&self, state: State, sending: bool, cx: &mut Context<Self>) -> Div {
         let (message, terminal, tint) = match &state {
-            State::Connecting => ("Connecting to the target…".into(), false, MUTED),
+            State::Connecting => ("Preparing transfer…".into(), false, MUTED),
             State::Waiting(code) => (
                 format!("Waiting for the target to accept. Target code: {code}"),
                 false,
@@ -632,11 +661,7 @@ impl Strata {
                 TEXT,
             ),
             State::Finished(Some(path)) => (format!("Saved to {}", path.display()), true, TEXT),
-            State::Finished(None) => (
-                "Transfer complete. The target saved the file.".into(),
-                true,
-                TEXT,
-            ),
+            State::Finished(None) => ("Transfer complete.".into(), true, TEXT),
             State::Declined => ("Transfer declined or expired.".into(), true, MUTED),
             State::Failed(error) => (error.clone(), true, RED),
         };
@@ -705,6 +730,7 @@ impl Strata {
                         transfer.address.focus_handle(cx),
                         transfer.refresh_focus.clone(),
                         self.modal_choose_focus.clone(),
+                        transfer.folder_focus.clone(),
                     ]);
                 } else if editable {
                     handles.extend([
@@ -737,7 +763,12 @@ impl Strata {
                 self.close_local_transfer(window, cx)
             }
             "enter" | "space" if editable && self.modal_choose_focus.is_focused(window) => {
-                self.browse_transfer(window, cx)
+                self.browse_transfer(!sending, window, cx)
+            }
+            "enter" | "space"
+                if editable && sending && transfer.folder_focus.is_focused(window) =>
+            {
+                self.browse_transfer(true, window, cx)
             }
             "enter" | "space"
                 if editable && sending && transfer.refresh_focus.is_focused(window) =>
