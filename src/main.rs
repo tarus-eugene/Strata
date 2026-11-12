@@ -77,13 +77,15 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let _browser_listener = match strata::bridge::start(manager.clone(), &history) {
-        Ok(listener) => Some(listener),
-        Err(error) => {
-            *manager.browser_error.lock().unwrap() = Some(format!("{error:#}"));
-            None
-        }
-    };
+    let (download_requests, pending_downloads) = tokio::sync::mpsc::channel(32);
+    let _browser_listener =
+        match strata::bridge::start(manager.clone(), &history, download_requests) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                *manager.browser_error.lock().unwrap() = Some(format!("{error:#}"));
+                None
+            }
+        };
     let shutdown = manager.clone();
     Application::new()
         .with_assets(brand::BrandAssets)
@@ -120,7 +122,7 @@ fn main() -> anyhow::Result<()> {
                         }).detach();
                     }
                     let app = cx.new(|cx| {
-                        ui::Strata::new(Arc::clone(&manager), tray.clone(), tray_error, window, cx)
+                        ui::Strata::new(Arc::clone(&manager), tray.clone(), tray_error, pending_downloads, window, cx)
                     });
                     window.on_window_should_close(cx, move |_, cx| {
                         if let Some(tray) = &tray && !tray.quitting() {

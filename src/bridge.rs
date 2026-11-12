@@ -1,11 +1,12 @@
-use crate::engine::Manager;
+use crate::engine::{Manager, PreparedDownload};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
 };
+use tokio::sync::{mpsc, oneshot};
 
 pub const HOST_NAME: &str = "com.strata.download_manager";
 pub const EXTENSION_ID: &str = include_str!("../extension/id.txt");
@@ -108,6 +109,8 @@ pub enum Request {
         filename: Option<String>,
         #[serde(default)]
         referrer: Option<String>,
+        #[serde(default)]
+        size: Option<u64>,
     },
     Transfer {
         source: String,
@@ -125,6 +128,8 @@ pub struct Reply {
     pub id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
 }
 
 impl Reply {
@@ -134,7 +139,44 @@ impl Reply {
             version: env!("CARGO_PKG_VERSION").into(),
             id: None,
             error: Some(error.to_string()),
+            cancelled: false,
         }
+    }
+
+    fn success(id: Option<u64>) -> Self {
+        Self {
+            ok: true,
+            version: env!("CARGO_PKG_VERSION").into(),
+            id,
+            error: None,
+            cancelled: false,
+        }
+    }
+}
+
+pub struct DownloadRequest {
+    pub download: PreparedDownload,
+    pub directory: PathBuf,
+    pub connections: usize,
+    pub size: Option<u64>,
+    pub response: DownloadResponse,
+}
+
+pub struct DownloadResponse(oneshot::Sender<Reply>);
+
+impl DownloadResponse {
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    pub fn accept(self, id: u64) {
+        let _ = self.0.send(Reply::success(Some(id)));
+    }
+
+    pub fn cancel(self) {
+        let mut reply = Reply::error("Download cancelled in 101 Downloader.");
+        reply.cancelled = true;
+        let _ = self.0.send(reply);
     }
 }
 
@@ -164,62 +206,62 @@ pub fn write_message(writer: &mut impl Write, reply: &Reply) -> Result<()> {
     Ok(())
 }
 
-fn dispatch(manager: &Arc<Manager>, request: Request) -> Reply {
-    let result = match request {
-        Request::Ping => Ok(None),
+async fn dispatch(
+    manager: &Manager,
+    requests: &mpsc::Sender<DownloadRequest>,
+    request: Request,
+) -> Reply {
+    let settings = manager.settings.lock().unwrap().clone();
+    let (download, directory, connections, size) = match request {
+        Request::Ping => return Reply::success(None),
         Request::Open => {
-            manager
-                .show_requested
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(None)
+            manager.show_requested.store(true, Ordering::SeqCst);
+            return Reply::success(None);
         }
         Request::Download {
             url,
             filename,
             referrer,
-        } => {
-            let result = manager
-                .add_from_browser(&url, filename.as_deref(), referrer.as_deref())
-                .map(Some);
-            if result.is_ok() {
-                manager
-                    .show_requested
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            result
-        }
+            size,
+        } => (
+            manager.prepare_browser_download(&url, filename.as_deref(), referrer.as_deref()),
+            settings.directory,
+            settings.connections,
+            size,
+        ),
         Request::Transfer {
             source,
             directory,
             connections,
             options,
-        } => {
-            let settings = manager.settings.lock().unwrap().clone();
-            let result = manager
-                .add_with_options(
-                    &source,
-                    directory.unwrap_or(settings.directory),
-                    connections.unwrap_or(settings.connections),
-                    *options,
-                )
-                .map(Some);
-            if result.is_ok() {
-                manager
-                    .show_requested
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            result
-        }
+        } => (
+            manager.prepare_download(&source, *options),
+            directory.unwrap_or(settings.directory),
+            connections.unwrap_or(settings.connections),
+            None,
+        ),
     };
-    match result {
-        Ok(id) => Reply {
-            ok: true,
-            version: env!("CARGO_PKG_VERSION").into(),
-            id,
-            error: None,
-        },
-        Err(error) => Reply::error(format!("{error:#}")),
+    let download = match download {
+        Ok(download) => download,
+        Err(error) => return Reply::error(format!("{error:#}")),
+    };
+    let (reply, result) = oneshot::channel();
+    if requests
+        .try_send(DownloadRequest {
+            download,
+            directory,
+            connections,
+            size,
+            response: DownloadResponse(reply),
+        })
+        .is_err()
+    {
+        return Reply::error("101 Downloader cannot review another download right now.");
     }
+    manager.show_requested.store(true, Ordering::SeqCst);
+    result
+        .await
+        .unwrap_or_else(|_| Reply::error("101 Downloader closed before confirming the download."))
 }
 
 #[cfg(windows)]
@@ -231,6 +273,7 @@ mod platform {
     use std::{
         hash::{DefaultHasher, Hash, Hasher},
         process::{Command, Stdio},
+        sync::Arc,
         time::Duration,
     };
     use tokio::{
@@ -327,7 +370,11 @@ mod platform {
         }
     }
 
-    pub fn start(manager: Arc<Manager>, history: &Path) -> Result<BrowserListener> {
+    pub fn start(
+        manager: Arc<Manager>,
+        history: &Path,
+        requests: mpsc::Sender<DownloadRequest>,
+    ) -> Result<BrowserListener> {
         let (name, sid) = pipe_name(history)?;
         let runtime = manager.runtime_handle();
         let server = {
@@ -350,25 +397,26 @@ mod platform {
                 };
                 let connected = std::mem::replace(&mut server, next);
                 let manager = manager.clone();
+                let requests = requests.clone();
                 tokio::spawn(async move {
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(10), handle(connected, manager))
-                            .await;
+                    let _ = handle(connected, manager, requests).await;
                 });
             }
         })))
     }
 
-    async fn handle(mut pipe: NamedPipeServer, manager: Arc<Manager>) -> Result<()> {
-        let length = pipe.read_u32_le().await? as usize;
-        ensure!(
-            (1..=MAX_MESSAGE).contains(&length),
-            "Invalid bridge-message size"
-        );
-        let mut bytes = vec![0; length];
-        pipe.read_exact(&mut bytes).await?;
+    async fn handle(
+        mut pipe: NamedPipeServer,
+        manager: Arc<Manager>,
+        requests: mpsc::Sender<DownloadRequest>,
+    ) -> Result<()> {
+        let bytes = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut pipe)).await??;
         let reply = match serde_json::from_slice(&bytes) {
-            Ok(request) => dispatch(&manager, request),
+            Ok(request) => tokio::select! {
+                biased;
+                _ = pipe.read_u8() => return Ok(()),
+                reply = dispatch(&manager, &requests, request) => reply,
+            },
             Err(error) => Reply::error(error),
         };
         let bytes = serde_json::to_vec(&reply)?;
@@ -376,6 +424,17 @@ mod platform {
         pipe.write_all(&bytes).await?;
         pipe.flush().await?;
         Ok(())
+    }
+
+    async fn read_frame(pipe: &mut (impl AsyncReadExt + Unpin)) -> Result<Vec<u8>> {
+        let length = pipe.read_u32_le().await? as usize;
+        ensure!(
+            (1..=MAX_MESSAGE).contains(&length),
+            "Invalid bridge-message size"
+        );
+        let mut bytes = vec![0; length];
+        pipe.read_exact(&mut bytes).await?;
+        Ok(bytes)
     }
 
     pub async fn send(request: &Request, history: &Path, launch: bool) -> Result<Reply> {
@@ -427,19 +486,14 @@ mod platform {
         ensure!(bytes.len() <= MAX_MESSAGE, "Request is too large");
         pipe.write_u32_le(bytes.len() as u32).await?;
         pipe.write_all(&bytes).await?;
-        let reply = tokio::time::timeout(Duration::from_secs(20), async {
-            let length = pipe.read_u32_le().await? as usize;
-            ensure!(
-                (1..=MAX_MESSAGE).contains(&length),
-                "Invalid app reply size"
-            );
-            let mut bytes = vec![0; length];
-            pipe.read_exact(&mut bytes).await?;
-            serde_json::from_slice(&bytes).context("Invalid app reply")
-        })
-        .await
-        .context("101 Downloader did not acknowledge the transfer")??;
-        Ok(reply)
+        let reply = if matches!(request, Request::Download { .. } | Request::Transfer { .. }) {
+            read_frame(&mut pipe).await?
+        } else {
+            tokio::time::timeout(Duration::from_secs(20), read_frame(&mut pipe))
+                .await
+                .context("101 Downloader did not respond")??
+        };
+        serde_json::from_slice(&reply).context("Invalid app reply")
     }
 }
 
@@ -491,7 +545,8 @@ mod tests {
         let history = dir.path().join("history.json");
         let manager = Manager::new(history.clone()).unwrap();
         manager.settings.lock().unwrap().directory = dir.path().into();
-        let listener = start(manager.clone(), &history).unwrap();
+        let (requests, mut pending) = mpsc::channel(2);
+        let listener = start(manager.clone(), &history, requests).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -517,6 +572,7 @@ mod tests {
                     url: "file:///private".into(),
                     filename: None,
                     referrer: None,
+                    size: None,
                 },
                 &history,
                 false,
@@ -529,47 +585,73 @@ mod tests {
                 .show_requested
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
-        let reply = rt
-            .block_on(send(
-                &Request::Download {
-                    url: "http://127.0.0.1:9/browser-file.bin".into(),
-                    filename: Some("browser-file.bin".into()),
-                    referrer: None,
-                },
-                &history,
-                false,
-            ))
-            .unwrap();
-        assert!(reply.ok, "{:?}", reply.error);
-        assert!(
-            manager
-                .show_requested
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-        );
-        manager.cancel(reply.id.unwrap());
-        let reply = rt
-            .block_on(send(
-                &Request::Transfer {
-                    source: "http://127.0.0.1:9/cli-file.bin".into(),
-                    directory: Some(dir.path().into()),
-                    connections: Some(4),
-                    options: Box::default(),
-                },
-                &history,
-                false,
-            ))
-            .unwrap();
+        let reply = rt.block_on(async {
+            let request = Request::Download {
+                url: "http://127.0.0.1:9/browser-file.bin".into(),
+                filename: Some("browser-file.bin".into()),
+                referrer: None,
+                size: Some(4096),
+            };
+            let (reply, ()) = tokio::join!(send(&request, &history, false), async {
+                let request = pending.recv().await.unwrap();
+                assert_eq!(request.download.name(), "browser-file.bin");
+                assert_eq!(request.size, Some(4096));
+                assert!(manager.snapshots().is_empty());
+                request.response.cancel();
+            });
+            reply.unwrap()
+        });
+        assert!(reply.cancelled);
+        assert!(manager.snapshots().is_empty());
+        let destination = dir.path().join("custom");
+        std::fs::create_dir(&destination).unwrap();
+        let action = crate::engine::CompletionAction::Open;
+        let reply = rt.block_on(async {
+            let request = Request::Transfer {
+                source: "http://127.0.0.1:9/cli-file.bin".into(),
+                directory: Some(dir.path().into()),
+                connections: Some(4),
+                options: Box::default(),
+            };
+            let (reply, ()) = tokio::join!(send(&request, &history, false), async {
+                let request = pending.recv().await.unwrap();
+                assert!(manager.snapshots().is_empty());
+                assert_eq!(request.directory, dir.path());
+                assert!(
+                    manager
+                        .start_download(
+                            &request.download,
+                            destination.clone(),
+                            request.connections,
+                            Some("../invalid.bin"),
+                            Some(action),
+                        )
+                        .is_err()
+                );
+                let id = manager
+                    .start_download(
+                        &request.download,
+                        destination.clone(),
+                        request.connections,
+                        Some("custom.bin"),
+                        Some(action),
+                    )
+                    .unwrap();
+                request.response.accept(id);
+            });
+            reply.unwrap()
+        });
         assert!(reply.ok, "{:?}", reply.error);
         let id = reply.id.unwrap();
-        assert_eq!(
-            manager
-                .snapshots()
-                .into_iter()
-                .find(|d| d.id == id)
-                .unwrap()
-                .connections,
-            4
-        );
+        let download = manager
+            .snapshots()
+            .into_iter()
+            .find(|d| d.id == id)
+            .unwrap();
+        assert_eq!(download.connections, 4);
+        assert_eq!(download.directory, destination);
+        assert_eq!(download.name, "custom.bin");
+        assert_eq!(download.completion_action, Some(action));
         assert!(
             manager
                 .show_requested

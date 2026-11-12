@@ -19,7 +19,24 @@ export function eligible(item) {
 function nativeRequest(item) {
   const referrer = /^https?:\/\//i.test(item.referrer || '') ? item.referrer : null;
   return { action: 'download', url: item.finalUrl || item.url,
-    filename: (item.filename || '').split(/[\\/]/).pop() || null, referrer };
+    filename: (item.filename || '').split(/[\\/]/).pop() || null, referrer,
+    ...(Number.isSafeInteger(item.totalBytes) && item.totalBytes >= 0 ? { size: item.totalBytes } : {}) };
+}
+
+function requestDownload(api, request) {
+  // A native port keeps the service worker alive while the desktop dialog is open.
+  return new Promise((resolve, reject) => {
+    const port = api.runtime.connectNative(HOST);
+    port.onMessage.addListener(reply => {
+      resolve(reply);
+      port.disconnect();
+    });
+    port.onDisconnect.addListener(() => {
+      reject(new Error(api.runtime.lastError?.message || '101 Downloader disconnected.'));
+    });
+    try { port.postMessage(request); }
+    catch (error) { port.disconnect(); reject(error); }
+  });
 }
 
 export function usefulFilename(filename) {
@@ -43,7 +60,7 @@ async function record(api, message, error = false) {
   if (error) await api.action.setBadgeBackgroundColor({ color: '#9f4049' });
 }
 
-export async function captureDownload(item, api) {
+export async function captureDownload(item, api, onPaused) {
   if (!eligible(item)) {
     if (item.state === 'in_progress') await setDownloadUi(api, true);
     return false;
@@ -53,6 +70,8 @@ export async function captureDownload(item, api) {
   active.add(item.id);
   let paused = false;
   let accepted = false;
+  let cancelled = false;
+  let browserCleared = false;
   try {
     const { captureEnabled = true } = await api.storage.local.get('captureEnabled');
     if (!captureEnabled) return false;
@@ -67,8 +86,17 @@ export async function captureDownload(item, api) {
       await setDownloadUi(api, true);
       return false;
     }
+    onPaused?.();
     const download = { ...item, ...current, filename: usefulFilename(current.filename) ? current.filename : (item.filename || current.filename) };
-    const reply = await api.runtime.sendNativeMessage(HOST, nativeRequest(download));
+    const reply = await requestDownload(api, nativeRequest(download));
+    if (reply?.cancelled === true) {
+      cancelled = true;
+      await api.storage.local.set({ [key]: { id: item.id, startTime: item.startTime, phase: 'cancelled' } });
+      await api.downloads.cancel(item.id);
+      browserCleared = true;
+      await record(api, 'Download cancelled in 101 Downloader.');
+      return false;
+    }
     if (reply?.ok !== true || !Number.isSafeInteger(reply.id) || reply.id <= 0) {
       throw new Error(reply?.error || '101 Downloader did not accept the download.');
     }
@@ -76,6 +104,7 @@ export async function captureDownload(item, api) {
     await api.storage.local.set({ [key]: { id: item.id, startTime: item.startTime, phase: 'accepted', appId: reply.id } });
     try {
       await api.downloads.cancel(item.id);
+      browserCleared = true;
       await record(api, `Sent ${nativeRequest({ ...item, ...current }).filename || 'download'} to 101 Downloader.`);
     } catch {
       await record(api, 'Sent to 101 Downloader. Your browser could not clear its paused copy; you can cancel it from its downloads page.', true);
@@ -83,6 +112,10 @@ export async function captureDownload(item, api) {
     return true;
   } catch (error) {
     await setDownloadUi(api, true);
+    if (cancelled) {
+      await record(api, 'Open your browser downloads page to cancel its paused copy.', true);
+      return false;
+    }
     let message = 'Kept in your browser. ' + error.message;
     if (paused && !accepted) {
       try { await api.downloads.resume(item.id); }
@@ -91,7 +124,9 @@ export async function captureDownload(item, api) {
     await record(api, message, true);
     return false;
   } finally {
-    try { await api.storage.local.remove(key); } finally { active.delete(item.id); }
+    try {
+      if (browserCleared || (!accepted && !cancelled)) await api.storage.local.remove(key);
+    } finally { active.delete(item.id); }
   }
 }
 
@@ -108,7 +143,7 @@ export async function recoverPending(api) {
     try {
       const [item] = await api.downloads.search({ id: pending.id });
       if (typeof pending.startTime === 'string' && item?.startTime === pending.startTime && item.state === 'in_progress' && item.paused) {
-        if (pending.phase === 'accepted') await api.downloads.cancel(pending.id);
+        if (pending.phase === 'accepted' || pending.phase === 'cancelled') await api.downloads.cancel(pending.id);
         else { await api.downloads.resume(pending.id); await setDownloadUi(api, true); }
       }
       await api.storage.local.remove(key);
@@ -136,7 +171,11 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
     ready.then(() => eligible(item) ? syncDownloadUi(chrome) : setDownloadUi(chrome, true)).catch(error => record(chrome, error.message, true));
   });
   chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    ready.then(() => captureDownload(item, chrome)).catch(error => record(chrome, error.message, true)).finally(() => suggest());
+    let suggested = false;
+    const release = () => {
+      if (!suggested) { suggested = true; suggest(); }
+    };
+    ready.then(() => captureDownload(item, chrome, release)).catch(error => record(chrome, error.message, true)).finally(release);
     return true;
   });
   chrome.downloads.onChanged.addListener(delta => {
@@ -146,10 +185,11 @@ if (globalThis.chrome?.runtime?.id && typeof document === 'undefined') {
     if (info.menuItemId !== 'send-to-strata') return;
     try {
       if (!remoteLink(info.linkUrl)) throw new Error('Choose an HTTP, FTP, SFTP, WebDAV, or magnet download link.');
-      const reply = await chrome.runtime.sendNativeMessage(HOST, {
+      const reply = await requestDownload(chrome, {
         action: 'download', url: info.linkUrl,
         referrer: /^https?:\/\//i.test(info.pageUrl || '') ? info.pageUrl : null,
       });
+      if (reply?.cancelled === true) return;
       if (!reply?.ok) throw new Error(reply?.error || '101 Downloader did not accept this link.');
       await record(chrome, 'Link sent to 101 Downloader.');
     } catch (error) { await record(chrome, error.message, true); }

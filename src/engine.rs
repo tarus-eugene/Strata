@@ -33,6 +33,8 @@ mod tools;
 mod torrent;
 mod video;
 
+pub(crate) use controls::validate_name;
+
 pub use integrity::IntegrityFile;
 
 const RUN: u8 = 0;
@@ -166,6 +168,27 @@ impl Part {
 pub struct TorrentFile {
     pub name: String,
     pub size: u64,
+}
+
+pub struct PreparedDownload {
+    source: Source,
+    referrer: Option<String>,
+    name: String,
+    preserve_name: bool,
+}
+
+impl PreparedDownload {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn protocol(&self) -> Protocol {
+        self.source.protocol
+    }
+
+    pub fn url(&self) -> &Url {
+        &self.source.url
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -480,7 +503,8 @@ impl Manager {
         connections: usize,
         options: TransferOptions,
     ) -> Result<u64> {
-        self.add_with_metadata(input, directory, connections, None, None, options)
+        let download = self.prepare_download(input, options)?;
+        self.start_download(&download, directory, connections, None, None)
     }
 
     pub(crate) fn runtime_handle(&self) -> Handle {
@@ -493,6 +517,23 @@ impl Manager {
         name: Option<&str>,
         referrer: Option<&str>,
     ) -> Result<u64> {
+        let download = self.prepare_browser_download(input, name, referrer)?;
+        let settings = self.settings.lock().unwrap().clone();
+        self.start_download(
+            &download,
+            settings.directory,
+            settings.connections,
+            None,
+            None,
+        )
+    }
+
+    pub fn prepare_browser_download(
+        &self,
+        input: &str,
+        name: Option<&str>,
+        referrer: Option<&str>,
+    ) -> Result<PreparedDownload> {
         let browser_url = Url::parse(input)?;
         ensure!(
             matches!(
@@ -501,7 +542,6 @@ impl Manager {
             ),
             "Browsers may send only remote download links, never local file paths"
         );
-        let settings = self.settings.lock().unwrap().clone();
         let referrer = referrer
             .filter(|s| !s.is_empty())
             .map(validate_url)
@@ -510,29 +550,24 @@ impl Manager {
         let name = name
             .filter(|s| !s.is_empty())
             .map(|s| sanitize_filename(s.rsplit(['/', '\\']).next().unwrap_or(s)));
-        self.add_with_metadata(
-            input,
-            settings.directory,
-            settings.connections,
-            name,
-            referrer,
-            TransferOptions::default(),
-        )
+        self.prepare_with_metadata(input, name, referrer, TransferOptions::default())
     }
 
-    fn add_with_metadata(
-        self: &Arc<Self>,
+    pub fn prepare_download(
+        &self,
         input: &str,
-        directory: PathBuf,
-        connections: usize,
+        options: TransferOptions,
+    ) -> Result<PreparedDownload> {
+        self.prepare_with_metadata(input, None, None, options)
+    }
+
+    fn prepare_with_metadata(
+        &self,
+        input: &str,
         suggested_name: Option<String>,
         referrer: Option<String>,
         options: TransferOptions,
-    ) -> Result<u64> {
-        ensure!(
-            !self.quitting.load(Ordering::SeqCst),
-            "101 Downloader is quitting. Open it again and retry."
-        );
+    ) -> Result<PreparedDownload> {
         let defaults = self.settings.lock().unwrap().transport.clone();
         let explicit_proxy = options.proxy.is_some();
         let mut options = options.with_defaults(&defaults);
@@ -560,14 +595,10 @@ impl Manager {
             "This protocol does not support an explicit proxy. Proxy routing is available for HTTP(S), WebDAV, Metalink HTTP mirrors, and video transfers."
         );
         let url = &source.url;
-        let directory = std::path::absolute(directory)?;
-        ensure!(directory.is_dir(), "Choose an existing download folder.");
-        let mut jobs = self.jobs.lock().unwrap();
-        let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
         let preserve_name = suggested_name
             .as_ref()
             .is_some_and(|name| !naming::generated_name(name));
-        let base = if source.protocol.folder_output() {
+        let name = if source.protocol.folder_output() {
             let name = if let Some(name) = &suggested_name {
                 name.clone()
             } else if url.scheme() == "magnet" {
@@ -588,9 +619,41 @@ impl Manager {
         } else {
             suggested_name.unwrap_or_else(|| filename(url))
         };
+        Ok(PreparedDownload {
+            source,
+            referrer,
+            name,
+            preserve_name,
+        })
+    }
+
+    pub fn start_download(
+        self: &Arc<Self>,
+        download: &PreparedDownload,
+        directory: PathBuf,
+        connections: usize,
+        name: Option<&str>,
+        completion_action: Option<CompletionAction>,
+    ) -> Result<u64> {
+        ensure!(
+            !self.quitting.load(Ordering::SeqCst),
+            "101 Downloader is quitting. Open it again and retry."
+        );
+        if let Some(name) = name {
+            controls::validate_name(name)?;
+        }
+        ensure!(
+            !directory.as_os_str().is_empty(),
+            "Choose an existing download folder."
+        );
+        let directory = std::path::absolute(directory)?;
+        ensure!(directory.is_dir(), "Choose an existing download folder.");
+        let mut jobs = self.jobs.lock().unwrap();
+        let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+        let preserve_name = name.is_some() || download.preserve_name;
         let name = available_name(
             &directory,
-            &base,
+            name.unwrap_or(&download.name),
             &jobs
                 .iter()
                 .map(|j| j.data.lock().unwrap().path())
@@ -599,7 +662,7 @@ impl Manager {
         let job = Arc::new(Job {
             data: Mutex::new(Download {
                 id,
-                url: url.to_string(),
+                url: download.source.url.to_string(),
                 name,
                 directory,
                 total: None,
@@ -612,10 +675,10 @@ impl Manager {
                 connections: connections.min(16),
                 created: id / 1_000_000,
                 completed_at: None,
-                completion_action: None,
-                referrer,
-                protocol: source.protocol,
-                options: source.options,
+                completion_action,
+                referrer: download.referrer.clone(),
+                protocol: download.source.protocol,
+                options: download.source.options.clone(),
                 preserve_name,
                 owns_output: false,
                 priority: Priority::Normal,

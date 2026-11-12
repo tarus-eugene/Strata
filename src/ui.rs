@@ -13,14 +13,23 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use strata::engine::{
-    AUTO_CONNECTIONS, CompletionAction, Download, DownloadChange, Manager, Priority, Status,
+use strata::{
+    bridge::{DownloadRequest, DownloadResponse},
+    engine::{
+        AUTO_CONNECTIONS, CompletionAction, Download, DownloadChange, Manager, PreparedDownload,
+        Priority, Status,
+    },
+    protocol::Protocol,
 };
+use tokio::sync::mpsc;
+
+mod local_transfer;
 
 const BG: u32 = 0x000000;
 const SURFACE: u32 = 0x191919;
 const RAISED: u32 = 0x333333;
 const RULE: u32 = 0x333333;
+const OVERLAY_BORDER: u32 = 0x44484c;
 const TEXT: u32 = 0xf9f9f9;
 const MUTED: u32 = 0xa7a7a7;
 const FAINT: u32 = 0xa7a7a7;
@@ -41,7 +50,6 @@ enum View {
     Active,
     Finished,
     Paused,
-    Settings,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +66,21 @@ enum EditModal {
     SpeedLimit(Vec<u64>),
     GlobalSpeedLimit,
     OnComplete(u64),
+}
+
+enum DownloadOrigin {
+    Manual,
+    Update,
+    External(DownloadResponse),
+}
+
+struct DownloadConfirmation {
+    download: PreparedDownload,
+    directory: PathBuf,
+    connections: usize,
+    size: Option<u64>,
+    completion: usize,
+    origin: DownloadOrigin,
 }
 
 #[derive(Clone, Copy)]
@@ -110,6 +133,7 @@ enum Icon {
 
 pub struct Strata {
     manager: Arc<Manager>,
+    local_transfer: local_transfer::TransferUi,
     tray: Option<Rc<Tray>>,
     tray_error: Option<String>,
     downloads: Vec<Download>,
@@ -132,6 +156,12 @@ pub struct Strata {
     url: Entity<TextInput>,
     search: Entity<TextInput>,
     search_query: String,
+    pending_downloads: mpsc::Receiver<DownloadRequest>,
+    confirmation: Option<DownloadConfirmation>,
+    download_name: Entity<TextInput>,
+    download_directory: Entity<TextInput>,
+    confirmation_choices: [FocusHandle; COMPLETION_CHOICES.len()],
+    download_directory_prompt: Option<Task<()>>,
     proxy: Entity<TextInput>,
     identity: Entity<TextInput>,
     known_hosts: Entity<TextInput>,
@@ -151,6 +181,7 @@ pub struct Strata {
     modal_close_focus: FocusHandle,
     modal_choose_focus: FocusHandle,
     modal_start_focus: FocusHandle,
+    modal_back_focus: FocusHandle,
     browser_registered: bool,
     browser_notice: Option<String>,
     update_checking: bool,
@@ -161,6 +192,9 @@ pub struct Strata {
     rates: HashMap<u64, DownloadSpeed>,
     queue_scroll: ScrollState,
     settings_scroll: ScrollState,
+    settings_open: bool,
+    settings_trigger: FocusHandle,
+    settings_close: FocusHandle,
     add_scroll: ScrollState,
     edit_scroll: ScrollState,
     torrent_scroll: ScrollState,
@@ -233,6 +267,7 @@ impl Strata {
         manager: Arc<Manager>,
         tray: Option<Rc<Tray>>,
         tray_error: Option<String>,
+        pending_downloads: mpsc::Receiver<DownloadRequest>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -240,10 +275,13 @@ impl Strata {
             .inspect_err(|error| eprintln!("Could not enable file dragging: {error:#}"))
             .is_ok();
         let settings = manager.settings.lock().unwrap().clone();
+        let local_transfer = local_transfer::TransferUi::new(&manager, window, cx);
         let url =
             cx.new(|cx| TextInput::new("URL, magnet link, torrent or Metalink file", window, cx));
         let search = cx.new(|cx| TextInput::new("Search downloads", window, cx));
         let edit_input = cx.new(|cx| TextInput::new("", window, cx));
+        let download_name = cx.new(|cx| TextInput::new("Enter a name", window, cx));
+        let download_directory = cx.new(|cx| TextInput::new("Choose a folder", window, cx));
         let proxy = cx.new(|cx| {
             TextInput::new(
                 "http://, https:// or socks5:// proxy (optional)",
@@ -332,10 +370,10 @@ impl Strata {
                         }
                         this.refresh();
                         this.run_completion_actions(window, cx);
+                        this.poll_local_transfers(window, cx);
+                        this.show_pending_download(window, cx);
                         this.show_pending_torrent(window, cx);
-                        if this.view != View::Settings
-                            && !this.tray.as_ref().is_some_and(|tray| tray.is_hidden())
-                        {
+                        if !this.tray.as_ref().is_some_and(|tray| tray.is_hidden()) {
                             cx.notify();
                         }
                     })
@@ -351,6 +389,7 @@ impl Strata {
         let selected = downloads.last().map(|d| d.id);
         let mut app = Self {
             manager,
+            local_transfer,
             tray,
             tray_error,
             downloads,
@@ -373,6 +412,12 @@ impl Strata {
             url,
             search,
             search_query: String::new(),
+            pending_downloads,
+            confirmation: None,
+            download_name,
+            download_directory,
+            confirmation_choices: std::array::from_fn(|_| cx.focus_handle()),
+            download_directory_prompt: None,
             proxy,
             identity,
             known_hosts,
@@ -392,6 +437,7 @@ impl Strata {
             modal_close_focus: cx.focus_handle(),
             modal_choose_focus: cx.focus_handle(),
             modal_start_focus: cx.focus_handle(),
+            modal_back_focus: cx.focus_handle(),
             browser_registered: strata::bridge::browsers_registered(),
             browser_notice: None,
             update_checking: false,
@@ -402,6 +448,9 @@ impl Strata {
             rates: HashMap::new(),
             queue_scroll: ScrollState::default(),
             settings_scroll: ScrollState::default(),
+            settings_open: false,
+            settings_trigger: cx.focus_handle(),
+            settings_close: cx.focus_handle(),
             add_scroll: ScrollState::default(),
             edit_scroll: ScrollState::default(),
             torrent_scroll: ScrollState::default(),
@@ -486,32 +535,166 @@ impl Strata {
         .detach();
     }
 
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.url.read(cx).value().to_owned();
+    fn review_manual_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self
             .manager
-            .add(&value, self.directory.clone(), self.connections)
+            .prepare_download(self.url.read(cx).value(), Default::default())
         {
+            Ok(download) => self.show_download_confirmation(
+                DownloadConfirmation {
+                    download,
+                    directory: self.directory.clone(),
+                    connections: self.connections,
+                    size: None,
+                    completion: 0,
+                    origin: DownloadOrigin::Manual,
+                },
+                window,
+                cx,
+            ),
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn show_download_confirmation(
+        &mut self,
+        confirmation: DownloadConfirmation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_resize();
+        self.settings_open = false;
+        self.menu = None;
+        self.adding = false;
+        self.error = None;
+        self.add_scroll = ScrollState::default();
+        self.download_name.update(cx, |input, cx| {
+            let name = confirmation.download.name();
+            input.set_value(name, cx);
+            input.select_prefix(
+                filename_selection_end(name, confirmation.download.protocol().folder_output()),
+                cx,
+            );
+        });
+        self.download_directory.update(cx, |input, cx| {
+            input.set_value(&confirmation.directory.to_string_lossy(), cx)
+        });
+        self.confirmation = Some(confirmation);
+        self.download_name.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn show_pending_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirmation.as_ref().is_some_and(|confirmation| {
+            matches!(&confirmation.origin, DownloadOrigin::External(response) if response.is_closed())
+        }) {
+            self.close_add(window, cx);
+        }
+        if self.confirmation.is_some()
+            || self.adding
+            || self.edit.is_some()
+            || self.torrent_picker.is_some()
+            || self.menu.is_some()
+            || self.local_transfer.is_open()
+        {
+            return;
+        }
+        while let Ok(request) = self.pending_downloads.try_recv() {
+            if request.response.is_closed() {
+                continue;
+            }
+            self.show_download_confirmation(
+                DownloadConfirmation {
+                    download: request.download,
+                    directory: request.directory,
+                    connections: request.connections,
+                    size: request.size,
+                    completion: 0,
+                    origin: DownloadOrigin::External(request.response),
+                },
+                window,
+                cx,
+            );
+            break;
+        }
+    }
+
+    fn start_confirmed_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirmation) = &self.confirmation else {
+            return;
+        };
+        if matches!(&confirmation.origin, DownloadOrigin::External(response) if response.is_closed())
+        {
+            self.close_add(window, cx);
+            return;
+        }
+        let name = self.download_name.read(cx).value();
+        let directory = self.download_directory.read(cx).value();
+        let directory = if directory == confirmation.directory.to_string_lossy().as_ref() {
+            confirmation.directory.clone()
+        } else {
+            PathBuf::from(directory.trim())
+        };
+        match self.manager.start_download(
+            &confirmation.download,
+            directory,
+            confirmation.connections,
+            (name != confirmation.download.name()).then_some(name),
+            COMPLETION_CHOICES[confirmation.completion],
+        ) {
             Ok(id) => {
-                self.selected = Some(id);
-                self.adding = false;
+                match self.confirmation.take().unwrap().origin {
+                    DownloadOrigin::Manual => {
+                        self.url.update(cx, |input, cx| input.set_value("", cx))
+                    }
+                    DownloadOrigin::Update => {
+                        self.update_notice = Some("Installer added to your downloads. When it finishes, quit through the tray menu, then run the installer.".into());
+                        self.update_available = None;
+                    }
+                    DownloadOrigin::External(response) => response.accept(id),
+                }
                 self.error = None;
+                self.download_directory_prompt = None;
                 self.view = View::All;
-                self.url.update(cx, |input, cx| input.set_value("", cx));
-                window.focus(&self.focus);
+                self.focus.focus(window);
                 self.refresh();
             }
-            Err(e) => self.error = Some(format!("{e:#}")),
+            Err(error) => self.error = Some(format!("{error:#}")),
         }
         cx.notify();
+    }
+
+    fn close_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(confirmation) = self.confirmation.take()
+            && let DownloadOrigin::External(response) = confirmation.origin
+        {
+            response.cancel();
+        }
+        self.adding = false;
+        self.download_directory_prompt = None;
+        self.error = None;
+        self.focus.focus(window);
+        cx.notify();
+    }
+
+    fn back_to_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_add(window, cx);
+        self.adding = true;
+        self.add_scroll = ScrollState::default();
+        self.url.focus_handle(cx).focus(window);
     }
 
     fn show_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_resize();
         self.menu = None;
+        self.settings_open = false;
         self.view = View::All;
         self.adding = true;
         self.error = None;
+        self.add_scroll = ScrollState::default();
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text())
             && strata::protocol::Source::parse(&text, Default::default()).is_ok()
         {
@@ -531,7 +714,12 @@ impl Strata {
             }
             return;
         }
-        if self.adding || self.edit.is_some() || self.menu.is_some() {
+        if self.adding
+            || self.confirmation.is_some()
+            || self.edit.is_some()
+            || self.menu.is_some()
+            || self.local_transfer.is_open()
+        {
             return;
         }
         if let Some(id) = self
@@ -547,6 +735,7 @@ impl Strata {
     fn open_torrent_options(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(download) = self.downloads.iter().find(|d| d.id == id) {
             self.menu = None;
+            self.settings_open = false;
             self.torrent_picker = Some(id);
             self.torrent_checked = download
                 .selected_files
@@ -665,6 +854,30 @@ impl Strata {
         .detach();
     }
 
+    fn choose_download_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a folder for this download".into()),
+        });
+        self.download_directory_prompt = Some(cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(confirmation) = &mut this.confirmation {
+                        this.download_directory
+                            .update(cx, |input, cx| input.set_value(&path.to_string_lossy(), cx));
+                        confirmation.directory = path;
+                        this.error = None;
+                        cx.notify();
+                    }
+                });
+            }
+        }));
+    }
+
     fn set_connections(&mut self, n: usize, cx: &mut Context<Self>) {
         self.connections = n;
         self.manager.settings.lock().unwrap().connections = n;
@@ -755,7 +968,6 @@ impl Strata {
                             Status::Paused | Status::Failed | Status::Cancelled
                         )
                     }
-                    View::Settings => false,
                 };
                 view && (d.name.to_lowercase().contains(&query) || d.host().contains(&query))
             })
@@ -822,8 +1034,7 @@ impl Strata {
         actions
     }
 
-    fn topbar(&self, cx: &mut Context<Self>) -> Div {
-        let settings_open = self.view == View::Settings;
+    fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let actions = self.toolbar_actions();
         div()
             .h(px(60.))
@@ -898,31 +1109,8 @@ impl Strata {
                             },
                         )),
                     )
-                    .child(
-                        button("top-settings", "Settings", Icon::Settings, false)
-                            .border_1()
-                            .border_color(rgb(if settings_open { ACCENT } else { RAISED }))
-                            .focus(move |style| {
-                                style.bg(rgb(0x444444)).border_color(rgb(if settings_open {
-                                    ACCENT
-                                } else {
-                                    RAISED
-                                }))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = None;
-                                this.view = if this.view == View::Settings {
-                                    View::All
-                                } else {
-                                    View::Settings
-                                };
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        button("top-add", "New download", Icon::Plus, true)
-                            .on_click(cx.listener(|this, _, window, cx| this.show_add(window, cx))),
-                    ),
+                    .child(self.settings_button(window, cx))
+                    .child(self.new_transfer_button(cx)),
             )
     }
 
@@ -1176,7 +1364,7 @@ impl Strata {
                     .max_h(relative(0.85))
                     .bg(rgb(SURFACE))
                     .border_1()
-                    .border_color(rgb(0x44484c))
+                    .border_color(rgb(OVERLAY_BORDER))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                         if !matches!(this.menu, Some((Menu::Completion(..), _))) {
                             this.close_edit(window, cx);
@@ -1194,6 +1382,7 @@ impl Strata {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_open = false;
         if let Menu::Download(id) = menu {
             if !self.checked.contains(&id) {
                 self.checked = [id].into_iter().collect();
@@ -1449,7 +1638,7 @@ impl Strata {
                         .p(px(4.))
                         .bg(rgb(SURFACE))
                         .border_1()
-                        .border_color(rgb(0x44484c))
+                        .border_color(rgb(OVERLAY_BORDER))
                         .flex()
                         .flex_col()
                         .track_focus(&self.menu_focus)
@@ -1634,11 +1823,7 @@ impl Strata {
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Div {
-        let count = if self.view == View::Settings {
-            self.downloads.len()
-        } else {
-            self.filtered(cx).len()
-        };
+        let count = self.filtered(cx).len();
         div()
             .h(px(32.))
             .w_full()
@@ -1660,23 +1845,21 @@ impl Strata {
             .child(div().flex_1())
             .child(icon(Icon::Folder, 14., FAINT))
             .child(label(short_path(&self.directory), 12., FAINT).truncate())
-            .when(self.view != View::Settings, |footer| {
-                footer.child(
-                    icon_button(
-                        "toggle-details",
-                        if self.details_collapsed {
-                            Icon::ChevronUp
-                        } else {
-                            Icon::ChevronDown
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.finish_resize();
-                        this.details_collapsed = !this.details_collapsed;
-                        cx.notify();
-                    })),
+            .child(
+                icon_button(
+                    "toggle-details",
+                    if self.details_collapsed {
+                        Icon::ChevronUp
+                    } else {
+                        Icon::ChevronDown
+                    },
                 )
-            })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.finish_resize();
+                    this.details_collapsed = !this.details_collapsed;
+                    cx.notify();
+                })),
+            )
     }
 
     fn empty(&self, cx: &mut Context<Self>) -> Div {
@@ -2048,7 +2231,7 @@ impl Strata {
                         .max_w(relative(0.9))
                         .bg(rgb(SURFACE))
                         .border_1()
-                        .border_color(rgb(0x44484c))
+                        .border_color(rgb(OVERLAY_BORDER))
                         .p(px(18.))
                         .flex()
                         .flex_col()
@@ -2177,7 +2360,11 @@ impl Strata {
                     scroll_area(
                         "new-download-modal",
                         &self.add_scroll,
-                        self.add_form(cx),
+                        if let Some(confirmation) = &self.confirmation {
+                            self.confirmation_form(confirmation, cx)
+                        } else {
+                            self.add_form(cx)
+                        },
                         window,
                         cx.entity_id(),
                     )
@@ -2186,12 +2373,11 @@ impl Strata {
                     .max_h(relative(0.85))
                     .bg(rgb(SURFACE))
                     .border_1()
-                    .border_color(rgb(0x44484c))
+                    .border_color(rgb(OVERLAY_BORDER))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                        this.adding = false;
-                        this.error = None;
-                        this.focus.focus(window);
-                        cx.notify();
+                        if this.adding {
+                            this.close_add(window, cx);
+                        }
                     })),
                 ),
         )
@@ -2214,12 +2400,9 @@ impl Strata {
                     .child(
                         icon_button("close-add", Icon::Close)
                             .track_focus(&self.modal_close_focus)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.adding = false;
-                                this.error = None;
-                                window.focus(&this.focus);
-                                cx.notify();
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_add(window, cx)),
+                            ),
                     ),
             )
             .child(label("Download link", 12., MUTED))
@@ -2238,47 +2421,224 @@ impl Strata {
             )
             .children(self.error.as_ref().map(|e| label(e.clone(), 12., RED)))
             .child(
-                button(
-                    "choose-descriptor",
-                    "Open torrent / Metalink file",
-                    Icon::Folder,
-                    false,
-                )
-                .track_focus(&self.modal_choose_focus)
-                .on_click(cx.listener(|this, _, window, cx| this.choose_source(window, cx))),
-            )
-            .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(icon(Icon::Folder, 15., FAINT))
-                            .child(label(short_path(&self.directory), 12., MUTED).truncate()),
+                        button(
+                            "choose-descriptor",
+                            "Open torrent / Metalink file",
+                            Icon::Folder,
+                            false,
+                        )
+                        .track_focus(&self.modal_choose_focus)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.choose_source(window, cx)),
+                        ),
                     )
                     .child(
-                        button("start-download", "Start download", Icon::Download, true)
+                        button("review-download", "Continue", Icon::ChevronRight, true)
                             .track_focus(&self.modal_start_focus)
-                            .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.review_manual_download(window, cx)
+                            })),
                     ),
             )
-            .child(label(
-                if self.connections == AUTO_CONNECTIONS {
-                    "Automatic connections · Enter to start · Esc to close".into()
+    }
+
+    fn confirmation_form(
+        &self,
+        confirmation: &DownloadConfirmation,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let download = &confirmation.download;
+        let torrent = download.protocol() == Protocol::Torrent;
+        let source = download.url().to_file_path().map_or_else(
+            |_| download.url().to_string(),
+            |path| path.display().to_string(),
+        );
+        let size = confirmation.size.map_or_else(
+            || {
+                if torrent {
+                    "Shown during file selection"
                 } else {
-                    format!(
-                        "Up to {} connections · Enter to start · Esc to close",
-                        self.connections
-                    )
+                    "Available after connecting"
+                }
+                .into()
+            },
+            bytes,
+        );
+        let start = if torrent {
+            "Choose files"
+        } else {
+            "Start download"
+        };
+        let connections = if confirmation.connections == AUTO_CONNECTIONS {
+            "Automatic".into()
+        } else {
+            format!("Up to {}", confirmation.connections)
+        };
+        let folder_output = download.protocol().folder_output();
+        let manual = matches!(confirmation.origin, DownloadOrigin::Manual);
+        div()
+            .p(px(22.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(label("Confirm download", 18., TEXT).font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        icon_button("close-confirmation", Icon::Close)
+                            .track_focus(&self.modal_close_focus)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_add(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p(px(12.))
+                    .bg(rgb(BG))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(detail_line("Source", &source))
+                    .child(detail_line("Type", download.protocol().label()))
+                    .child(detail_line("Size", &size))
+                    .when(
+                        !matches!(download.protocol(), Protocol::Ftp | Protocol::Sftp),
+                        |details| details.child(detail_line("Connections", &connections)),
+                    ),
+            )
+            .child(transport_input(
+                if folder_output {
+                    "Folder name"
+                } else {
+                    "File name"
                 },
-                11.,
-                FAINT,
+                self.download_name.clone(),
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(8.))
+                    .child(
+                        transport_input("Save to", self.download_directory.clone())
+                            .min_w_0()
+                            .flex_1(),
+                    )
+                    .child(
+                        button("browse-download-folder", "Browse", Icon::Folder, false)
+                            .h(px(40.))
+                            .flex_shrink_0()
+                            .track_focus(&self.modal_choose_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_download_directory(window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(label("On download complete", 13., TEXT).font_weight(FontWeight::MEDIUM))
+                    .child(
+                        div().flex().flex_wrap().gap(px(6.)).children(
+                            COMPLETION_CHOICES
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, action)| {
+                                    let selected = index == confirmation.completion;
+                                    div()
+                                        .id(("download-completion", index))
+                                        .px(px(10.))
+                                        .h(px(34.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .border_1()
+                                        .cursor_pointer()
+                                        .border_color(rgb(if selected { ACCENT } else { RULE }))
+                                        .bg(rgb(if selected { RAISED } else { SURFACE }))
+                                        .focusable()
+                                        .track_focus(&self.confirmation_choices[index])
+                                        .focus(|style| style.border_color(rgb(ACCENT)))
+                                        .hover(|style| style.bg(rgb(RAISED)))
+                                        .when(selected, |choice| {
+                                            choice.child(icon(Icon::Check, 13., ACCENT))
+                                        })
+                                        .child(label(
+                                            action.map_or("Do nothing", CompletionAction::label),
+                                            12.,
+                                            TEXT,
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.choose_completion(index, cx)
+                                        }))
+                                }),
+                        ),
+                    )
+                    .children(match COMPLETION_CHOICES[confirmation.completion] {
+                        None => None,
+                        Some(CompletionAction::Open) => Some(label(
+                            "Opens an EXE or COM program, or opens the download folder.",
+                            12.,
+                            MUTED,
+                        )),
+                        Some(_) => Some(label(
+                            "This action affects the whole PC when the download finishes.",
+                            12.,
+                            MUTED,
+                        )),
+                    }),
+            )
+            .children(self.error.as_ref().map(|error| label(error, 12., RED)))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        button(
+                            "back-download",
+                            if manual { "Back" } else { "Cancel" },
+                            if manual { Icon::Arrow } else { Icon::Close },
+                            false,
+                        )
+                        .track_focus(&self.modal_back_focus)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                if manual {
+                                    this.back_to_source(window, cx);
+                                } else {
+                                    this.close_add(window, cx);
+                                }
+                            },
+                        )),
+                    )
+                    .child(
+                        button("confirm-download", start, Icon::Download, true)
+                            .track_focus(&self.modal_start_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_confirmed_download(window, cx)
+                            })),
+                    ),
+            )
+    }
+
+    fn choose_completion(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(confirmation) = &mut self.confirmation {
+            confirmation.completion = index;
+            cx.notify();
+        }
     }
 
     fn details_resizer(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2490,22 +2850,26 @@ impl Strata {
         cx.notify();
     }
 
-    fn download_update(&mut self, cx: &mut Context<Self>) {
+    fn download_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(update) = &self.update_available else {
             return;
         };
-        match self.manager.add(
-            &update.installer_url,
-            self.directory.clone(),
-            self.connections,
-        ) {
-            Ok(id) => {
-                self.update_notice = Some("Installer added to your downloads. When it finishes, quit through the tray menu, then run the installer.".into());
-                self.update_available = None;
-                self.selected = Some(id);
-                self.view = View::All;
-                self.refresh();
-            }
+        match self
+            .manager
+            .prepare_download(&update.installer_url, Default::default())
+        {
+            Ok(download) => self.show_download_confirmation(
+                DownloadConfirmation {
+                    download,
+                    directory: self.directory.clone(),
+                    connections: self.connections,
+                    size: None,
+                    completion: 0,
+                    origin: DownloadOrigin::Update,
+                },
+                window,
+                cx,
+            ),
             Err(error) => {
                 self.update_notice = Some(format!("Could not download the update: {error:#}"))
             }
@@ -2513,11 +2877,138 @@ impl Strata {
         cx.notify();
     }
 
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.settings_open = !self.settings_open;
+        if self.settings_open {
+            self.settings_close.focus(window);
+        } else {
+            self.settings_trigger.focus(window);
+        }
+        cx.notify();
+    }
+
+    fn settings_button(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let open = self.settings_open;
+        let trigger = Rc::new(Cell::new(Bounds::default()));
+        let measured = trigger.clone();
+        div()
+            .relative()
+            .flex_shrink_0()
+            .on_children_prepainted(move |children, _, _| measured.set(children[0]))
+            .child(
+                button("top-settings", "Settings", Icon::Settings, false)
+                    .w(px(94.))
+                    .border_1()
+                    .border_color(rgb(if open { ACCENT } else { RAISED }))
+                    .track_focus(&self.settings_trigger)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_settings(window, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+            .children(open.then(|| self.settings_popover(trigger, window, cx)))
+    }
+
+    fn settings_popover(
+        &self,
+        trigger: Rc<Cell<Bounds<Pixels>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let height = (window.viewport_size().height - px(180.))
+            .max(px(50.))
+            .min(px(500.));
+        div()
+            .absolute()
+            .top(px(45.))
+            .right_0()
+            .w(px(468.))
+            .h(height)
+            .child(
+                deferred(
+                    div()
+                        .id("settings-popover")
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .occlude()
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(OVERLAY_BORDER))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .flex_shrink_0()
+                                .h(px(50.))
+                                .px(px(18.))
+                                .border_b_1()
+                                .border_color(rgb(RULE))
+                                .child(
+                                    label("Settings", 18., TEXT).font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    icon_button("close-settings", Icon::Close)
+                                        .track_focus(&self.settings_close)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_settings(window, cx)
+                                        }))
+                                        .on_key_down(cx.listener(
+                                            |this, event: &KeyDownEvent, window, cx| {
+                                                if matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                ) {
+                                                    this.toggle_settings(window, cx);
+                                                    cx.stop_propagation();
+                                                }
+                                            },
+                                        )),
+                                ),
+                        )
+                        .child(self.settings(window, cx))
+                        .on_mouse_down_out(cx.listener(
+                            move |this, event: &MouseDownEvent, _, cx| {
+                                if this.edit.is_none() && !trigger.get().contains(&event.position) {
+                                    this.settings_open = false;
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                )
+                .with_priority(1),
+            )
+            // GPUI paints a div's border after its children. Paint the pointer over the border.
+            .child(
+                deferred(
+                    div()
+                        .absolute()
+                        .top(px(-9.))
+                        .right(px(37.))
+                        .child(settings_pointer()),
+                )
+                .with_priority(1),
+            )
+    }
+
     fn settings(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let completion_chime = self.manager.settings.lock().unwrap().completion_chime;
-        let content = div().p(px(32.)).flex().flex_col().gap(px(24.))
-            .child(label("Settings", 24., TEXT).font_weight(FontWeight::SEMIBOLD))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+        let section = || {
+            div()
+                .py(px(12.))
+                .border_b_1()
+                .border_color(rgb(RULE))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+        };
+        let content = div().px(px(18.)).pb(px(12.)).flex().flex_col()
+            .child(section()
                 .child(label("Completion chime", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("Play a sound when a download finishes.", 13., MUTED))
                 .child(button("completion-chime", if completion_chime { "Turn off chime" } else { "Turn on chime" }, Icon::Settings, false)
@@ -2529,12 +3020,12 @@ impl Strata {
                         this.manager.persist();
                         cx.notify();
                     }))))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("Global speed limit", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label({ let limit = self.manager.settings.lock().unwrap().speed_limit; if limit == 0 { "Unlimited".into() } else { format!("{}/s shared across all downloads", bytes(limit)) } }, 13., MUTED))
                 .child(button("global-speed-limit", "Set global speed limit", Icon::Settings, false)
                     .on_click(cx.listener(|this, _, window, cx| this.open_edit(EditModal::GlobalSpeedLimit, window, cx)))))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("App updates", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label(format!("Installed version {}", env!("CARGO_PKG_VERSION")), 13., MUTED))
                 .child(label("Download stable updates from GitHub. After the download finishes, quit through the tray menu and run the installer.", 13., MUTED).max_w(px(620.)))
@@ -2544,9 +3035,9 @@ impl Strata {
                         .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx))))
                     .when(self.update_available.is_some(), |row| row.child(
                         button("download-update", "Download update", Icon::Download, true)
-                            .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))))))
+                            .on_click(cx.listener(|this, _, window, cx| this.download_update(window, cx))))))
                 .children(self.update_notice.as_ref().map(|message| label(message, 12., MUTED))))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("Connections & authentication", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("Proxy settings apply to HTTP, HTTPS, WebDAV, Metalink HTTP mirrors, and video transfers. FTP, SFTP, and torrent peers use direct connections. URL passwords are protected by Windows.", 13., MUTED).max_w(px(620.)))
                 .child(transport_input("HTTP / HTTPS / SOCKS5 proxy", self.proxy.clone()))
@@ -2555,12 +3046,12 @@ impl Strata {
                 .child(label("SFTP refuses unknown or changed host keys. Verify the host with OpenSSH first. Encrypted keys can use 101Downloader-cli --key-passphrase-stdin.", 12., FAINT).max_w(px(620.)))
                 .child(button("save-transport", "Save connection settings", Icon::Link, false).on_click(cx.listener(|this, _, _, cx| this.save_transport(cx))))
                 .children(self.transport_notice.as_ref().map(|message| label(message, 12., MUTED))))
-            .child(div().mt(px(10.)).p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("Download folder", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("New downloads are saved here. Existing transfers keep their destination.", 13., MUTED))
                 .child(label(self.directory.display().to_string(), 13., TEXT))
                 .child(button("choose-folder", "Choose folder", Icon::Folder, false).on_click(cx.listener(|this, _, window, cx| this.choose_directory(window, cx)))))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("Connections per download", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("Auto chooses up to 16 connections for HTTP downloads based on file size and server support. You can also set a limit yourself.", 13., MUTED).max_w(px(620.)))
                 .child(div().flex().gap(px(10.)).children([AUTO_CONNECTIONS, 1, 4, 8, 16].into_iter().map(|n| {
@@ -2569,7 +3060,7 @@ impl Strata {
                         .focusable().focus(|s| s.border_1().border_color(rgb(ACCENT))).hover(|s| s.opacity(0.85)).child(if n == AUTO_CONNECTIONS { "Auto".into() } else { n.to_string() })
                         .on_click(cx.listener(move |this, _, _, cx| this.set_connections(n, cx)))
                 }))))
-            .child(div().p(px(22.)).bg(rgb(SURFACE)).flex().flex_col().gap(px(14.))
+            .child(section()
                 .child(label("Browser companion", 15., TEXT).font_weight(FontWeight::MEDIUM))
                 .child(label("Capture file downloads in Chromium browsers and send them straight to 101 Downloader. The browser extension controls when capture is on.", 13., MUTED).max_w(px(620.)))
                 .child(label(if self.browser_registered { "Local bridge registered" } else { "Connect the app, then load the extension in your browser." }, 12., if self.browser_registered { ACCENT } else { FAINT }))
@@ -2582,10 +3073,7 @@ impl Strata {
                     })))
                     .child(button("extension-folder", "Extension folder", Icon::Folder, false).on_click(|_, _, _| reveal(&strata::bridge::extension_directory()))))
                 .children(self.browser_notice.as_ref().map(|message| label(message, 12., MUTED)))
-                .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))))
-            .child(label("Up to 3 downloads run at once. Partial files and history are saved automatically.", 12., FAINT))
-            .when(self.tray.is_some(), |view| view.child(label("Closing the window keeps downloads running in the system tray. Right-click the tray icon and choose Quit 101 Downloader to exit.", 12., FAINT)))
-        ;
+                .children(self.manager.browser_error.lock().unwrap().as_ref().map(|message| label(message, 12., RED))));
         scroll_area(
             "settings-scroll",
             &self.settings_scroll,
@@ -2651,6 +3139,73 @@ impl Render for Strata {
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.local_transfer.is_open() {
+                    this.transfer_key_down(event, window, cx);
+                    return;
+                }
+                if this.confirmation.is_some() {
+                    let name = this.download_name.focus_handle(cx);
+                    let directory = this.download_directory.focus_handle(cx);
+                    match key {
+                        "escape" => this.close_add(window, cx),
+                        "tab" => {
+                            let handles = [name, directory, this.modal_choose_focus.clone()]
+                                .into_iter()
+                                .chain(this.confirmation_choices.iter().cloned())
+                                .chain([
+                                    this.modal_back_focus.clone(),
+                                    this.modal_start_focus.clone(),
+                                    this.modal_close_focus.clone(),
+                                ])
+                                .collect::<Vec<_>>();
+                            let index = handles
+                                .iter()
+                                .position(|handle| handle.is_focused(window))
+                                .unwrap_or(0);
+                            let next = if event.keystroke.modifiers.shift {
+                                (index + handles.len() - 1) % handles.len()
+                            } else {
+                                (index + 1) % handles.len()
+                            };
+                            handles[next].focus(window);
+                        }
+                        "enter" | "space" if this.modal_choose_focus.is_focused(window) => {
+                            this.choose_download_directory(window, cx)
+                        }
+                        "enter" | "space" if this.modal_close_focus.is_focused(window) => {
+                            this.close_add(window, cx)
+                        }
+                        "enter" | "space" if this.modal_back_focus.is_focused(window) => {
+                            if matches!(
+                                this.confirmation.as_ref().map(|draft| &draft.origin),
+                                Some(DownloadOrigin::Manual)
+                            ) {
+                                this.back_to_source(window, cx);
+                            } else {
+                                this.close_add(window, cx);
+                            }
+                        }
+                        "enter" | "space" if this.modal_start_focus.is_focused(window) => {
+                            this.start_confirmed_download(window, cx)
+                        }
+                        "enter" if name.is_focused(window) || directory.is_focused(window) => {
+                            this.start_confirmed_download(window, cx)
+                        }
+                        "enter" | "space" => {
+                            let Some(index) = this
+                                .confirmation_choices
+                                .iter()
+                                .position(|handle| handle.is_focused(window))
+                            else {
+                                return;
+                            };
+                            this.choose_completion(index, cx);
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.torrent_picker.is_some() {
                     let focused = this
                         .torrent_focus
@@ -2799,30 +3354,41 @@ impl Render for Strata {
                     return;
                 }
                 if event.keystroke.modifiers.control && key == "n" {
-                    this.show_add(window, cx);
+                    this.activate_new(window, cx);
                     cx.stop_propagation();
                 } else if event.keystroke.modifiers.control && key == "f" {
                     this.menu = None;
+                    this.settings_open = false;
                     if this.adding {
                         this.url.focus_handle(cx).focus(window);
                     } else {
                         this.search.focus_handle(cx).focus(window);
                     }
                 } else if key == "escape" {
+                    if this.settings_open {
+                        this.toggle_settings(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if this.menu.take().is_some() {
                         this.focus.focus(window);
                         cx.notify();
                         return;
                     }
-                    this.adding = false;
-                    this.error = None;
-                    window.focus(&this.focus);
-                    cx.notify();
-                } else if key == "enter"
-                    && this.adding
-                    && this.url.focus_handle(cx).is_focused(window)
-                {
-                    this.add(window, cx);
+                    this.close_add(window, cx);
+                } else if this.adding && matches!(key, "enter" | "space") {
+                    if this.modal_choose_focus.is_focused(window) {
+                        this.choose_source(window, cx);
+                    } else if this.modal_close_focus.is_focused(window) {
+                        this.close_add(window, cx);
+                    } else if this.modal_start_focus.is_focused(window)
+                        || (key == "enter" && this.url.focus_handle(cx).is_focused(window))
+                    {
+                        this.review_manual_download(window, cx);
+                    } else {
+                        return;
+                    }
+                    cx.stop_propagation();
                 } else if key == "tab" {
                     if this.adding {
                         let handles = [
@@ -2852,41 +3418,38 @@ impl Render for Strata {
                 }
             }))
             .child(self.titlebar(window, cx))
-            .children(
-                self.update_available
-                    .as_ref()
-                    .filter(|_| self.view != View::Settings)
-                    .map(|update| {
-                        div()
-                            .w_full()
-                            .flex_shrink_0()
-                            .px(px(28.))
-                            .py(px(12.))
-                            .bg(rgb(SURFACE))
-                            .border_b_1()
-                            .border_color(rgb(RULE))
-                            .flex()
-                            .items_center()
-                            .gap(px(16.))
-                            .child(
-                                label(
-                                    format!("101 Downloader {} is available.", update.version),
-                                    13.,
-                                    TEXT,
-                                )
-                                .flex_1(),
-                            )
-                            .child(
-                                button(
-                                    "offer-download-update",
-                                    "Download update",
-                                    Icon::Download,
-                                    true,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))),
-                            )
-                    }),
-            )
+            .children(self.update_available.as_ref().map(|update| {
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(28.))
+                    .py(px(12.))
+                    .bg(rgb(SURFACE))
+                    .border_b_1()
+                    .border_color(rgb(RULE))
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .child(
+                        label(
+                            format!("101 Downloader {} is available.", update.version),
+                            13.,
+                            TEXT,
+                        )
+                        .flex_1(),
+                    )
+                    .child(
+                        button(
+                            "offer-download-update",
+                            "Download update",
+                            Icon::Download,
+                            true,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.download_update(window, cx)),
+                        ),
+                    )
+            }))
             .child(
                 // Focusable ancestors consume native caption mouse-down events in GPUI.
                 div()
@@ -2902,15 +3465,10 @@ impl Render for Strata {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .when(self.view == View::Settings, |d| {
-                                d.child(self.topbar(cx)).child(self.settings(window, cx))
-                            })
-                            .when(self.view != View::Settings, |d| {
-                                d.child(self.topbar(cx))
-                                    .child(self.queue(window, cx))
-                                    .when(!self.details_collapsed, |body| {
-                                        body.child(self.inspector(cx))
-                                    })
+                            .child(self.topbar(window, cx))
+                            .child(self.queue(window, cx))
+                            .when(!self.details_collapsed, |body| {
+                                body.child(self.inspector(cx))
                             })
                             .children(
                                 self.manager
@@ -2937,9 +3495,16 @@ impl Render for Strata {
                 self.menu
                     .map(|(menu, position)| self.popup_menu(menu, position, cx)),
             )
-            .children(self.adding.then(|| self.add_modal(window, cx)))
+            .children(
+                (self.adding || self.confirmation.is_some()).then(|| self.add_modal(window, cx)),
+            )
             .children(self.edit.as_ref().map(|_| self.edit_modal(window, cx)))
             .children(self.torrent_picker.map(|_| self.torrent_modal(window, cx)))
+            .children(
+                self.local_transfer
+                    .is_open()
+                    .then(|| self.transfer_modal(window, cx)),
+            )
     }
 }
 
@@ -3132,6 +3697,40 @@ fn detail_line(title: &str, value: &str) -> Div {
         .min_w_0()
         .child(label(title, 12., FAINT).w(px(94.)).flex_shrink_0())
         .child(label(value, 12., MUTED).flex_1().min_w_0().truncate())
+}
+
+fn settings_pointer() -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        |bounds, _, window, _| {
+            let points = [
+                bounds.origin + point(px(1.), px(9.5)),
+                bounds.origin + point(px(10.), px(1.)),
+                bounds.origin + point(px(19.), px(9.5)),
+            ];
+            let mut fill = PathBuilder::fill();
+            fill.add_polygon(
+                &[
+                    points[0],
+                    points[1],
+                    points[2],
+                    bounds.origin + point(px(19.), px(12.)),
+                    bounds.origin + point(px(1.), px(12.)),
+                ],
+                true,
+            );
+            if let Ok(path) = fill.build() {
+                window.paint_path(path, rgb(SURFACE));
+            }
+            let mut border = PathBuilder::stroke(px(1.));
+            border.add_polygon(&points, false);
+            if let Ok(path) = border.build() {
+                window.paint_path(path, rgb(OVERLAY_BORDER));
+            }
+        },
+    )
+    .w(px(20.))
+    .h(px(13.))
 }
 
 fn button(id: impl Into<SharedString>, text: &str, glyph: Icon, primary: bool) -> Stateful<Div> {
@@ -3532,7 +4131,9 @@ mod tests {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let app = cx.new(|cx| Strata::new(manager, None, None, window, cx));
+                    let (_, pending_downloads) = tokio::sync::mpsc::channel(1);
+                    let app = cx
+                        .new(|cx| Strata::new(manager, None, None, pending_downloads, window, cx));
                     assert!(app.read(cx).outbound_file_drag);
                     let error =
                         unsafe { RevokeDragDrop(window_hwnd(window).unwrap()) }.unwrap_err();

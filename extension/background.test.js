@@ -14,8 +14,22 @@ function mock(reply = { ok: true, id: 42 }) {
   const calls = []; const values = {}; let current = { ...item };
   const api = {
     calls, values, ui: [],
-    runtime: { id: 'strata', async sendNativeMessage(host, request) {
-      calls.push(['native', request]); if (reply instanceof Error) throw reply; return reply;
+    runtime: { id: 'strata', connectNative() {
+      let message, disconnect;
+      return {
+        onMessage: { addListener(callback) { message = callback; } },
+        onDisconnect: { addListener(callback) { disconnect = callback; } },
+        async postMessage(request) {
+          calls.push(['native', request]);
+          const response = await reply;
+          if (response instanceof Error) {
+            api.runtime.lastError = response;
+            disconnect();
+            delete api.runtime.lastError;
+          } else { message(response); }
+        },
+        disconnect() {},
+      };
     } },
     storage: { local: {
       async get(keys) { if (keys === null) return { ...values }; return Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(k => [k, values[k]])); },
@@ -49,6 +63,18 @@ test('resumes Chrome if the app rejects the request or the bridge is absent', as
     assert.equal(api.values.lastResult.error, true);
     assert.deepEqual(api.ui, [false, true]);
   }
+});
+
+test('keeps Chrome paused while confirmation is open and cancels on explicit dismissal', async () => {
+  let confirm;
+  const api = mock(new Promise(resolve => { confirm = resolve; }));
+  const capture = captureDownload({ ...item, totalBytes: 4096 }, api);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'native']);
+  assert.equal(api.calls[1][1].size, 4096);
+  confirm({ ok: false, cancelled: true });
+  assert.equal(await capture, false);
+  assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'native', 'cancel']);
 });
 
 test('suppresses the browser download UI with capture on and restores it with capture off', async () => {
@@ -119,10 +145,10 @@ test('does not resume Chrome when its cancellation fails after the app has accep
 });
 
 test('recovers paused handoffs after worker restart without resending to the app', async () => {
-  for (const phase of ['pending', 'accepted']) {
+  for (const phase of ['pending', 'accepted', 'cancelled']) {
     const api = mock(); api.values['handoff:7'] = { id: 7, startTime: item.startTime, phase }; api.setCurrent({ ...item, paused: true });
     await recoverPending(api);
-    assert.deepEqual(api.calls, [[phase === 'accepted' ? 'cancel' : 'resume', 7]]);
+    assert.deepEqual(api.calls, [[phase === 'pending' ? 'resume' : 'cancel', 7]]);
     assert.equal(api.values['handoff:7'], undefined);
   }
 });
@@ -142,7 +168,9 @@ test('does not act on a different download that reuses an old handoff ID', async
 });
 
 test('worker waits for filename determination, suggests once, and follows the capture toggle', async () => {
-  const api = mock(); const listeners = {};
+  let confirm;
+  const api = mock(new Promise(resolve => { confirm = resolve; }));
+  const listeners = {};
   const event = name => ({ addListener(callback) { listeners[name] = callback; } });
   api.runtime.onInstalled = event('install'); api.runtime.onStartup = event('startup');
   api.storage.onChanged = event('storage');
@@ -161,6 +189,9 @@ test('worker waits for filename determination, suggests once, and follows the ca
     await new Promise(resolve => {
       assert.equal(listeners.filename({ ...item, filename: 'Final report.pdf' }, () => { suggests++; resolve(); }), true);
     });
+    assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'native']);
+    confirm({ ok: true, id: 42 });
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(suggests, 1);
     assert.equal(api.calls.find(c => c[0] === 'native')[1].filename, 'Final report.pdf');
     assert.deepEqual(api.calls.map(c => c[0]), ['pause', 'native', 'cancel']);

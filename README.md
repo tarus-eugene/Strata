@@ -16,7 +16,8 @@ The app must be fully closed through **Quit 101 Downloader** in the tray menu be
 
 | Control | Behavior |
 | --- | --- |
-| **New download** / **Ctrl+N** | Accepts a URL, magnet link, or local torrent/Metalink descriptor. A valid clipboard source prefills the form. |
+| **New download** / **Ctrl+N** | Accepts a URL, magnet link, or local torrent/Metalink descriptor. A valid clipboard source prefills the form. Continue to review the source, change the name or destination, and choose what happens on completion. |
+| Chevron beside **New download** | Switches the primary button between **New download** and **New transfer**. |
 | **Search** / **Ctrl+F** | Filters the download table. Filter, Settings, and New download occupy the right side of the toolbar; selection actions occupy the left. |
 | Row selection | Checkboxes, **Ctrl+click**, **Shift+click**, and **Ctrl+Shift+click** support individual, range, and additive selection. The header checkbox selects visible rows; **Ctrl+A** selects them when the table has focus. |
 | Row context menu | Provides pause/resume, rename, priority, speed limit, open file/folder, copy link, cancel, and permanent deletion. Batch-capable actions apply to the current selection. |
@@ -26,13 +27,13 @@ The app must be fully closed through **Quit 101 Downloader** in the tray menu be
 | **Cancel** | Stops a transfer while retaining partial data. |
 | **Delete from device** | Waits for writes to stop, deletes owned output and partial data, and removes the entry after successful cleanup. Failures leave the entry available for retry. |
 
-Up to three downloads run simultaneously. In Settings, choose Auto or a limit of 1, 4, 8, or 16 connections. Auto uses the HTTP file size and server range support to choose a count. Auto is the default for new installations, and saved settings keep their selected count.
+Up to three downloads run simultaneously. Open the Settings popover from the toolbar to change the default download folder or choose Auto or a limit of 1, 4, 8, or 16 connections. Auto uses the HTTP file size and server range support to choose a count. Auto is the default for new installations, and saved settings keep their selected count.
 
 Hover over a clipped table row to see the full filename. Left-drag a completed row to move its file or folder, or middle-drag it to copy into File Explorer or another app that supports file drops. For moves on the same drive, the download entry follows the item to its new location. Moves between drives may still show **Missing**.
 
 Downloads play a Windows chime when they finish. Use **Settings → Completion chime** to turn it off.
 
-Use **On download complete** in an unfinished download's context menu to choose a one-time action for this session. Choosing an option applies it and closes the dialog. **Do nothing** clears the action. The PC can shut down, sleep, or restart after that download finishes. **Open** launches a Windows executable or opens the download folder.
+Choose a one-time action under **On download complete** in the confirmation dialog or change it later from an unfinished download's context menu. **Do nothing** clears the action. The PC can shut down, sleep, or restart after that download finishes. **Open** launches a Windows executable or opens the download folder.
 
 The bottom details panel shows the selected download's full filename, destination, source, completion time, priority, limit, and segmented progress. Its divider supports dragging and **Up/Down** keyboard resizing, and the height is remembered. The footer chevron collapses or restores the panel. Tables, Settings, and overflowing dialogs have draggable scrollbars. Smooth wheel scrolling respects Windows animation preferences.
 
@@ -78,9 +79,17 @@ Torrent, Metalink, and video transfers stage files privately and publish a downl
 
 Recognized video hosts include YouTube, Vimeo, Twitch, TikTok, and Instagram; `--ytdlp` selects the extractor for other supported sites. Site availability, login requirements, DRM, and upstream changes can prevent extraction. Browser cookies are not imported automatically. Pausing stops the media process tree and retains resumable files. Scheduling is not currently implemented.
 
+## Local Ethernet transfers
+
+Run 101 Downloader on both Windows computers. On the sender, use the chevron beside **New download** to switch to **New transfer**, then open it. Select the target from **Nearby devices**, or enter the target computer’s Ethernet IPv4 address from `ipconfig`. Choose a file and click **Send request**.
+
+On the target, the incoming dialog shows the sender, file, size, and a target code that also appears on the sender’s screen. The target user can change the filename and save folder, choose a completion action, then accept or decline. The file is sent over an encrypted connection after acceptance and is saved after its checksum is verified. Progress and the final result appear in the transfer dialogs.
+
+Transfers use TCP port `46275` and device discovery uses UDP on the same port. Both computers need reachable private or link-local IPv4 addresses on the Ethernet link. Entering the target’s IP directly works when broadcast discovery is unavailable.
+
 ## Command line
 
-`101Downloader-cli.exe` queues transfers in the desktop app and starts it when necessary. The desktop executable accepts the same transfer flags; the console client reports command-line errors and queue IDs.
+`101Downloader-cli.exe` opens the desktop app when necessary and waits for confirmation before returning the queue ID. The desktop executable accepts the same transfer flags.
 
 ```powershell
 .\101Downloader-cli.exe https://example.com/large.zip --connections 8
@@ -115,9 +124,9 @@ The installer registers the native bridge for the current Windows account. **Set
 2. **Load unpacked** accepts the installed or checked-out `extension` folder. **Settings → Extension folder** opens its location.
 3. The **101 Downloader — Download companion** popup shows connection status and the capture switch.
 
-Capture is enabled by default. Eligible browser downloads are paused during handoff and canceled only after the app confirms that the transfer was saved to its queue. A failed handoff resumes the browser's copy. Accepted downloads restore the desktop app. Browser safety scanning is respected, and pending handoffs are recovered after extension-worker restarts.
+Capture is enabled by default. Eligible browser downloads pause while the desktop app asks for confirmation. Starting the download in the app or cancelling it from the dialog clears the browser copy. A failed handoff resumes the browser's copy. Browser safety scanning is respected, and pending handoffs are recovered after extension-worker restarts.
 
-The extension sends the URL, browser filename, and referrer. It has no page injection, browsing-history access, or cookie/password import. Browser-generated `blob:` files, private downloads, already-paused downloads, and flagged files remain in the browser. Login-only and POST-generated downloads may require capture to be disabled. Queue acceptance confirms handoff; subsequent transfer errors appear in the desktop app.
+The extension sends the URL, browser filename, referrer, and file size when available. It has no page injection, browsing-history access, or cookie/password import. Browser-generated `blob:` files, private downloads, already-paused downloads, and flagged files remain in the browser. Login-only and POST-generated downloads may require capture to be disabled. Queue acceptance confirms handoff; subsequent transfer errors appear in the desktop app.
 
 The `downloads.ui` permission suppresses the browser download interface while capture is enabled. Capture-off and browser fallback restore it. This control is profile-wide and may be unavailable in some Chromium forks. Other permissions are `downloads`, `nativeMessaging`, `storage`, and `contextMenus`.
 

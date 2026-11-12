@@ -55,7 +55,7 @@ impl Job {
     }
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty() && sanitize_filename(name) == name,
         "Enter a valid filename without paths, reserved names, or trailing spaces or dots (up to 160 characters)."
